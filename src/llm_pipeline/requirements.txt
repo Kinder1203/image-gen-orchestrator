@@ -1,0 +1,18 @@
+# Core LLM Data Structures
+pydantic>=2.4.0
+pydantic-settings>=2.0.0
+loguru>=0.7.0
+
+# Langchain & LangGraph Orchestration
+langchain-core>=0.1.0
+langgraph>=0.0.26
+langchain-ollama>=0.0.1
+
+# HTTP and Image Processing Tools
+requests>=2.31.0
+rembg>=2.0.50
+Pillow>=10.0.0
+
+# (Optional) DB Connectors depending on User Choice
+# kuzu
+# langchain-chroma
