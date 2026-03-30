@@ -46,7 +46,7 @@ def intent_router_condition(state: AgentState) -> str:
     """ LangGraph 분기 결정을 리턴 """
     intent = state.get("intent", "")
     if intent == "image_processing":
-        return "preprocessor"
+        return "synthesizer" # (수정) preprocessor 삭제됨. 이미지 입력 시 3D 변환을 위해 곧장 다각도 생성기로 감.
     elif intent in ["text_generation", "text_modification"]:
         return "rag_retriever"
     else:

@@ -1,10 +1,24 @@
 import os
 import json
 from loguru import logger
-# from langchain_chroma import Chroma
-# from langchain_ollama import OllamaEmbeddings
+from langchain_chroma import Chroma
+from langchain_ollama import OllamaEmbeddings
+from ..core.config import config
 
-# 1. 원시 지식 (Knowledge Base) 데이터 
+# [B] 신발 디자인 도메인 전문 지식 (Shoe Terminology)
+SHOE_KNOWLEDGE_BASE = [
+    {
+        "category": "Shoe_Design",
+        "title": "Upper Materials",
+        "content": "Leather provides structure and durability. Mesh provides breathability. Suede offers a premium matte finish but requires careful lighting. Flyknit/Primeknit offers a sock-like seamless fit."
+    },
+    {
+        "category": "Shoe_Design",
+        "title": "Midsole and Outsole Types",
+        "content": "A 'cupsole' is commonly found in lifestyle and skate shoes (e.g., Dunk, Air Force 1), providing a rigid, flat base. 'EVA foam' is used in running shoes for cushioning. A 'chunky sole' or 'platform sole' drastically increases the height of the shoe profile."
+    }
+]
+
 # [A] Qwen Multi-angle 공식 프롬프트 가이드 (템플릿 기반 통제 규칙)
 QWEN_PROMPT_GUIDES = [
     {
@@ -24,39 +38,46 @@ QWEN_PROMPT_GUIDES = [
     }
 ]
 
-# [B] 신발 디자인 도메인 전문 지식 (Shoe Terminology)
-SHOE_KNOWLEDGE_BASE = [
-    {
-        "category": "Shoe_Design",
-        "title": "Upper Materials",
-        "content": "Leather provides structure and durability. Mesh provides breathability. Suede offers a premium matte finish but requires careful lighting. Flyknit/Primeknit offers a sock-like seamless fit."
-    },
-    {
-        "category": "Shoe_Design",
-        "title": "Midsole and Outsole Types",
-        "content": "A 'cupsole' is commonly found in lifestyle and skate shoes (e.g., Dunk, Air Force 1), providing a rigid, flat base. 'EVA foam' is used in running shoes for cushioning. A 'chunky sole' or 'platform sole' drastically increases the height of the shoe profile."
-    }
-]
-
-def init_vector_db(db_path: str = "../data/chroma_db"):
+def init_vector_db():
     """
-    위의 딕셔너리 지식들을 Vector DB나 KuzuDB에 임베딩하여 밀어 넣는 초기화 함수입니다.
+    위의 딕셔너리 지식들을 Chroma Vector DB에 임베딩하여 로컬에 밀어 넣는 초기화 함수입니다.
+    기존 Kuzu(GraphDB) 오버엔지니어링 코드를 제거하고 순수 Vector RAG로 다이어트했습니다.
     """
-    logger.info("Initializing Qwen Prompt & Shoe Knowledge Base DB...")
+    db_path = config.VECTOR_DB_PATH
+    logger.info(f"Initializing Lightweight Chroma DB at {db_path}...")
     
-    # 1. 임베딩 모델 준비 (Ollama 로컬 임베딩)
-    # embedder = OllamaEmbeddings(model="nomic-embed-text")
+    # 1. 임베딩 모델 준비 (로컬 Ollama 임베딩)
+    embedder = OllamaEmbeddings(model="nomic-embed-text", base_url=config.OLLAMA_BASE_URL)
     
-    # 2. 문서화 및 임베딩 
-    all_docs = QWEN_PROMPT_GUIDES + SHOE_KNOWLEDGE_BASE
-    
-    for idx, doc in enumerate(all_docs):
-        text = f"[{doc['category']}] {doc['title']}: {doc['content']}"
-        logger.debug(f"Ingesting logic {idx+1}/{len(all_docs)} into Vector DB...")
-        # db.add_texts(texts=[text], metadatas=[{"category": doc["category"]}])
+    # 임시 디렉토리 생성
+    db_dir = os.path.dirname(db_path)
+    if not os.path.exists(db_dir):
+        os.makedirs(db_dir, exist_ok=True)
         
-    logger.success(f"Successfully ingested {len(all_docs)} foundational rules into {db_path}.")
-    logger.info("Now the LLM Synthesizer will exactly know how to prompt the Qwen model!")
+    # 2. Chroma DB 객체 연결
+    vector_store = Chroma(
+        collection_name="shoe_qwen_rules",
+        embedding_function=embedder,
+        persist_directory=db_path
+    )
+    
+    # 3. 문서화 및 임베딩 
+    all_docs = QWEN_PROMPT_GUIDES + SHOE_KNOWLEDGE_BASE
+    texts = []
+    metadatas = []
+    
+    for doc in all_docs:
+        text = f"[{doc['category']}] {doc['title']}: {doc['content']}"
+        texts.append(text)
+        metadatas.append({"category": doc["category"], "title": doc["title"]})
+        
+    logger.debug(f"Ingesting {len(texts)} logic entries into Vector DB. This may take a moment...")
+    
+    # 4. DB에 일괄 삽입
+    vector_store.add_texts(texts=texts, metadatas=metadatas)
+    
+    logger.success(f"Successfully ingested {len(all_docs)} foundational rules into ChromaDB.")
+    logger.info("Now the LLM Synthesizer will quickly fetch and exactly know how to prompt the Qwen model!")
 
 if __name__ == "__main__":
     init_vector_db()

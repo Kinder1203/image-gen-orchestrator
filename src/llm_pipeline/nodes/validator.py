@@ -11,7 +11,7 @@ def validate_image_for_trellis(state: AgentState) -> dict:
     """
     (Step 4 - LLM-as-a-Judge)
     다중 이미지(Multi-view) 배열(`current_image_urls`) 각각에 대해 
-    Vision LLM이 3D 변환에 적합한지 (단색 흰 배경 확인 등) 검사합니다.
+    Vision LLM이 3D 변환에 적합한지 (구도, 단색 배경 확인 등) 검사합니다.
     (모든 다각도 이미지가 성공해야 통과)
     """
     current_image_urls = state.get("current_image_urls", [])
@@ -43,18 +43,20 @@ def validate_image_for_trellis(state: AgentState) -> dict:
         time.sleep(1) # 모의 
         
         try:
-            # 실제 구현: URL Base64 디코딩 후 HumanMessage(Content) 배열에 이미지 객체 포함하여 invoke
-            # response = llm.invoke(...)
-            # parsed = json.loads(response.content)
-            raise NotImplementedError("Base64 Multi-image upload parsing logic skeleton.")
-        except Exception as e:
-            # 더미 로직 동작 (Vision 모델 실제 미연결시 임시 통과)
-            passed_dummy = random.random() > 0.1 
+            # 실제 구현 전까지는 Vision 모델 API 직접 호출을 모의(bypass) 상태로 처리합니다.
+            # 백엔드 서버에서 파일 I/O(Base64) 로직이 들어가야 하므로 하드 에러를 방지합니다.
+            logger.debug("Vision Validation Bypassed: TODO implement base64 encoding.")
+            passed_dummy = random.random() > 0.1 # 90% 확률로 통과 가정
+            
             if not passed_dummy:
                 all_passed = False
                 feedbacks.append(f"View {idx+1} failed checking: Not pure white background.")
             else:
                 feedbacks.append(f"View {idx+1} passed white bg check.")
+        except Exception as e:
+            logger.error(f"Vision DB Error: {e}")
+            all_passed = False
+            feedbacks.append(f"View {idx+1} crashed during checking.")
     
     if all_passed:
         logger.success("All multi-angle views passed validation!")
