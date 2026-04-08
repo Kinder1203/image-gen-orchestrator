@@ -1,11 +1,14 @@
-# Scripts 디렉토리 명세 (Harness Engineering)
+# Scripts 디렉토리 명세
 
-파이프라인 백엔드 웹 서버와 독립적으로 실행되는 스크립트 도구들입니다.
-주로 데이터베이스 초기화 및 배치성 작업용으로 쓰입니다.
+`scripts/` 는 파이프라인 본체와 분리된 독립 실행 도구를 둡니다.
 
-## 책임 (Responsibilities)
-1. **`db_feeder.py`**: RAG용 Chroma Vector DB에 커플링 전문 지식(재질, 보석 세공, 프롬프팅 가이드 등)을 영구 적재(Ingest)하는 독립 실행형 파이썬 스크립트.
+## 현재 스크립트
+- `db_feeder.py`
+  - 반지 재질, 보색 배경, 각인, 수정, 다각도, rembg 검수 규칙을 Chroma DB 에 적재합니다.
+  - 전용 컬렉션을 새로 채우는 방식이라 다시 실행해도 같은 규칙이 중복으로 쌓이지 않습니다.
+  - 초기 세팅이나 지식 변경 시 수동으로 다시 실행합니다.
 
-## 제약 사항 (Constraints)
-* 파이프라인의 핵심 라우팅 과정 중에는 이 스크립트 파일이 호출되지 않습니다.
-* DB 구조가 변경되면 이 스크립트만 단독 실행(`python db_feeder.py`)하여 지식을 초기화합니다.
+## 사용 예시
+```bash
+python -m src.llm_pipeline.scripts.db_feeder
+```

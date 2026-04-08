@@ -1,112 +1,131 @@
-from .core.schemas import PipelineRequest, PipelineResponse
+import requests
+from loguru import logger
+
 from .agent import build_ring_generation_graph
 from .core.config import config
-from loguru import logger
-import requests
+from .core.schemas import PipelineRequest, PipelineResponse
 
 # 싱글톤 형태로 그래프 초기화
 app_graph = build_ring_generation_graph()
 
+
+def _build_initial_state(request: PipelineRequest) -> dict:
+    customization_prompt = request.customization_prompt or ""
+    if request.input_type == "image_and_text" and not customization_prompt:
+        customization_prompt = request.prompt or ""
+
+    return {
+        "user_prompt": request.prompt or "",
+        "input_type": request.input_type,
+        "base_ring_image_url": request.image_url or "",
+        "retry_count": 0,
+        "intent": "",
+        "customization_prompt": customization_prompt,
+        "status_message": "",
+    }
+
+
+def _failed_response(message: str, base_image_url: str = "") -> PipelineResponse:
+    return PipelineResponse(
+        status="failed",
+        optimized_image_urls=[],
+        message=message,
+        base_image_url=base_image_url,
+    )
+
+
 def process_generation_request(request: PipelineRequest) -> PipelineResponse:
     """
-    (Entrypoint) 외부 연동 API
-    - Action에 따라 LangGraph 모델을 초기 시작(start) 하거나 다시 진행시킵니다.
+    외부 연동용 엔트리포인트.
+    Action 에 따라 LangGraph 모델을 시작하거나 이어서 진행시킵니다.
     """
-    logger.info(f"User Request Intent Type: {request.input_type}")
+    if request.action == "start":
+        logger.info(f"User Request Input Type: {request.input_type}")
+    else:
+        logger.info("Follow-up action received without a new start payload.")
     logger.info(f"Action: {request.action} on Thread: {request.thread_id}")
 
     thread_config = {"configurable": {"thread_id": request.thread_id}}
 
     try:
         if request.action == "start":
-            initial_state = {
-                "user_prompt": request.prompt or "",
-                "input_type": request.input_type,
-                "base_ring_image_url": request.image_url or "",
-                "retry_count": 0,
-                "intent": "",
-                "customization_prompt": ""
-            }
-            # 초기 실행
-            app_graph.invoke(initial_state, config=thread_config)
-            
+            app_graph.invoke(_build_initial_state(request), config=thread_config)
+
         elif request.action == "accept_base":
-            # 인간 승인. 변경사항 없이 다각도 생성으로 속행
             app_graph.update_state(thread_config, {"intent": "approved_base_only"})
             app_graph.invoke(None, config=thread_config)
-            
+
         elif request.action == "request_customization":
-            # 커스텀(각인/큐빅) 요청 속행
-            app_graph.update_state(thread_config, {
-                "intent": "user_requested_customization",
-                "customization_prompt": request.customization_prompt or "",
-                "retry_count": 0 
-            })
+            app_graph.update_state(
+                thread_config,
+                {
+                    "intent": "user_requested_customization",
+                    "customization_prompt": request.customization_prompt or "",
+                    "retry_count": 0,
+                    "status_message": "",
+                },
+            )
             app_graph.invoke(None, config=thread_config)
 
-        # 현재 Langgraph 상태 체크 (중단/종료 구분)
         current_state_obj = app_graph.get_state(thread_config)
         final_state = current_state_obj.values
         next_nodes = current_state_obj.next
-        
-        # 만약 다음 노드가 잡혀있다면 == interrupt 발생 (사용자 대기)
+
         if next_nodes:
             logger.info(f"Pipeline paused. Waiting for human. Next nodes: {next_nodes}")
-            
+
             if "wait_for_edit_approval" in next_nodes:
                 return PipelineResponse(
                     status="waiting_for_user_edit",
                     optimized_image_urls=[],
                     base_image_url=final_state.get("edited_ring_image_url", ""),
-                    message="요청하신 커스텀 디자인이 적용되었습니다. 확정하시겠습니까, 아니면 다시 수정하시겠습니까?"
+                    message="요청하신 커스텀 디자인이 적용되었습니다. 확정하시겠습니까, 아니면 다시 수정하시겠습니까?",
                 )
-            else:
-                return PipelineResponse(
-                    status="waiting_for_user",
-                    optimized_image_urls=[],
-                    base_image_url=final_state.get("base_ring_image_url", ""),
-                    message="기본 반지가 준비되었습니다. 승인하시겠습니까, 아니면 커스텀(각인/보석)을 진행하시겠습니까?"
-                )
-            
-        # 끝났다면
+
+            return PipelineResponse(
+                status="waiting_for_user",
+                optimized_image_urls=[],
+                base_image_url=final_state.get("base_ring_image_url", ""),
+                message="기본 반지가 준비되었습니다. 승인하시겠습니까, 아니면 커스텀(각인/보석)을 진행하시겠습니까?",
+            )
+
         is_valid = final_state.get("is_valid", False)
-        
-        if is_valid:
-            output_urls = final_state.get("final_output_urls", [])
+        output_urls = final_state.get("final_output_urls", [])
+
+        if is_valid and output_urls:
             log_msg = f"렌더링 최적화 성공! (이미지 수: {len(output_urls)}장)"
-            
-            # 메인 서버 Webhook 전송 (백엔드 연동 전이므로 안전하게 예외처리 및 패스)
+
             if config.WEBHOOK_URL and config.WEBHOOK_URL != "NONE":
                 try:
                     payload = {
                         "status": "success",
                         "images": output_urls,
-                        "prompt_used": final_state.get("synthesized_prompt", "")
+                        "prompt_used": final_state.get("synthesized_prompt", ""),
                     }
-                    logger.info(f"Sending Webhook to backend: {config.WEBHOOK_URL} (아직 백엔드가 꺼져있다면 에러 무시됨)")
+                    logger.info(f"Sending Webhook to backend: {config.WEBHOOK_URL}")
                     requests.post(config.WEBHOOK_URL, json=payload, timeout=5)
-                except Exception as e:
-                    logger.warning(f"Webhook 발송 무시됨 (정상): 백엔드 서버에 아직 연결되지 않았습니다. ({e})")
-                
+                except Exception as exc:
+                    logger.warning(f"Webhook 발송 무시됨: 백엔드 서버에 아직 연결되지 않았습니다. ({exc})")
+
             return PipelineResponse(
                 status="success",
                 optimized_image_urls=output_urls,
                 message=log_msg,
-                base_image_url=final_state.get("base_ring_image_url", "")
+                base_image_url=final_state.get("edited_ring_image_url", "")
+                or final_state.get("base_ring_image_url", ""),
             )
-        else:
-            return PipelineResponse(
-                status="failed",
-                optimized_image_urls=[],
-                message=final_state.get("status_message", "검수 과정에서 최종 불합격 처리되었습니다."),
-                base_image_url=final_state.get("base_ring_image_url", "")
+
+        if is_valid and not output_urls:
+            return _failed_response(
+                final_state.get("status_message", "검수는 통과했지만 결과 이미지가 비어 있습니다."),
+                final_state.get("edited_ring_image_url", "") or final_state.get("base_ring_image_url", ""),
             )
-            
-    except Exception as e:
-        logger.error(f"Pipeline Error: {e}")
-        return PipelineResponse(
-            status="failed",
-            optimized_image_urls=[],
-            message="서버 오류로 인해 파이프라인이 중단되었습니다.",
-            base_image_url=""
+
+        return _failed_response(
+            final_state.get("status_message", "검수 과정에서 최종 불합격 처리되었습니다."),
+            final_state.get("edited_ring_image_url", "") or final_state.get("base_ring_image_url", ""),
         )
+
+    except Exception as exc:
+        logger.error(f"Pipeline Error: {exc}")
+        return _failed_response("서버 오류로 인해 파이프라인이 중단되었습니다.")

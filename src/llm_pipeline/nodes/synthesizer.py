@@ -1,204 +1,282 @@
-import time
 import json
 import logging
-import requests
-import re
 import random
+import time
+from pathlib import Path
+from typing import Optional
+
+import requests
 from langchain_core.messages import HumanMessage
 from langchain_ollama import ChatOllama
-from ..core.schemas import AgentState
+
 from ..core.config import config
+from ..core.schemas import AgentState
 
 logger = logging.getLogger(__name__)
 
-COMFY_URL = config.COMFYUI_URL
+COMFY_URL = config.COMFYUI_URL.rstrip("/")
 
-def _sync_call_comfyui(payload: dict) -> list:
+BASE_TEMPLATE_PATH = Path("image_z_image_turbo.json")
+EDIT_TEMPLATE_PATH = Path("image_qwen_image_edit_2509.json")
+MULTI_VIEW_TEMPLATE_PATH = Path("templates-1_click_multiple_character_angles-v1.0 (3).json")
+
+
+def _sync_call_comfyui(payload: dict) -> list[str]:
     """
-    ComfyUI에 프롬프트를 쏘고, 완료될 때까지 기다렸다가 진짜 저장된 파일 URL들을 긁어오는 함수.
-    이 함수 덕분에 하드코딩된 mock_url이 필요 없어집니다.
+    ComfyUI에 프롬프트를 전송하고, 완료된 산출물의 이미지 URL 목록을 반환합니다.
     """
+    if not payload:
+        logger.error("ComfyUI payload is empty.")
+        return []
+
     try:
-        # 1. 큐에 워크플로우 전송
         response = requests.post(f"{COMFY_URL}/prompt", json=payload, timeout=10)
+        response.raise_for_status()
         prompt_id = response.json().get("prompt_id")
-        
+
         if not prompt_id:
             logger.error("Failed to get prompt_id from ComfyUI.")
             return []
-            
+
         logger.info(f"Sent workflow to ComfyUI. Waiting for generation... (Prompt ID: {prompt_id})")
-        
-        # 2. 로딩 대기 (100초 타임아웃 방지 등 실제론 더 정교화 필요)
+
         while True:
-            hist_res = requests.get(f"{COMFY_URL}/history/{prompt_id}")
+            hist_res = requests.get(f"{COMFY_URL}/history/{prompt_id}", timeout=10)
+            hist_res.raise_for_status()
             hist_data = hist_res.json()
-            
-            # 생성 완료 시 history 객체에 prompt_id 키가 생성됨
+
             if prompt_id in hist_data:
-                # 3. 완료됨! 산출물 파일명 전부 추출
-                image_urls = []
+                image_urls: list[str] = []
                 outputs = hist_data[prompt_id].get("outputs", {})
-                
-                # 저장된 모든 노드의 outputs 순회
-                for node_id, out_data in outputs.items():
-                    if "images" in out_data:
-                        for img in out_data["images"]:
-                            filename = img["filename"]
-                            # ComfyUI의 View API 템플릿 반환
-                            image_urls.append(f"{COMFY_URL}/view?filename={filename}")
+
+                for out_data in outputs.values():
+                    for img in out_data.get("images", []):
+                        filename = img["filename"]
+                        image_urls.append(f"{COMFY_URL}/view?filename={filename}")
+
                 return image_urls
-                
-            time.sleep(2.0) # 2초마다 폴링
-            
-    except Exception as e:
-        logger.error(f"ComfyUI Polling Error: {e}")
+
+            time.sleep(2.0)
+
+    except Exception as exc:
+        logger.error(f"ComfyUI Polling Error: {exc}")
         return []
 
+
+def _load_workflow_template(template_path: Path) -> dict:
+    with template_path.open("r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+def _replace_placeholders(node: object, replacements: dict[str, str]) -> object:
+    if isinstance(node, dict):
+        return {key: _replace_placeholders(value, replacements) for key, value in node.items()}
+    if isinstance(node, list):
+        return [_replace_placeholders(item, replacements) for item in node]
+    if isinstance(node, str):
+        updated = node
+        for old, new in replacements.items():
+            updated = updated.replace(old, new)
+        return updated
+    return node
+
+
+def _randomize_seeds(node: object) -> object:
+    if isinstance(node, dict):
+        randomized = {}
+        for key, value in node.items():
+            if key in {"seed", "noise_seed"} and isinstance(value, int):
+                randomized[key] = random.randint(1, 2147483647)
+            else:
+                randomized[key] = _randomize_seeds(value)
+        return randomized
+    if isinstance(node, list):
+        return [_randomize_seeds(item) for item in node]
+    return node
+
+
+def _collect_load_image_nodes(workflow: dict) -> list[dict]:
+    return [node for node in workflow.get("nodes", []) if node.get("type") == "LoadImage"]
+
+
+def _select_edit_load_image_node(workflow: dict) -> dict:
+    load_nodes = _collect_load_image_nodes(workflow)
+    if len(load_nodes) == 1:
+        return load_nodes[0]
+    raise ValueError(f"Edit workflow requires exactly one LoadImage node, found {len(load_nodes)}.")
+
+
+def _select_multi_view_load_image_node(workflow: dict) -> dict:
+    load_nodes = _collect_load_image_nodes(workflow)
+    titled_nodes = [node for node in load_nodes if (node.get("title") or "") == "Load Character Image"]
+
+    if len(titled_nodes) == 1:
+        return titled_nodes[0]
+    if not titled_nodes and len(load_nodes) == 1:
+        return load_nodes[0]
+    if len(titled_nodes) > 1:
+        raise ValueError("Multi-view workflow has multiple 'Load Character Image' nodes.")
+    raise ValueError(f"Multi-view workflow has ambiguous LoadImage nodes: {len(load_nodes)} found.")
+
+
+def _set_load_image_value(node: dict, image_value: str) -> None:
+    widgets = node.get("widgets_values")
+    if not isinstance(widgets, list) or not widgets:
+        raise ValueError("Selected LoadImage node does not expose widgets_values[0].")
+    widgets[0] = image_value
+
+
+def _build_base_payload(enhanced_prompt: str) -> dict:
+    workflow = _load_workflow_template(BASE_TEMPLATE_PATH)
+    workflow = _replace_placeholders(workflow, {"___USER_PROMPT___": enhanced_prompt})
+    workflow = _randomize_seeds(workflow)
+    return {
+        "client_id": "llm_backend",
+        "prompt": workflow,
+    }
+
+
+def _build_edit_payload(base_image: str, custom_prompt: str) -> dict:
+    workflow = _load_workflow_template(EDIT_TEMPLATE_PATH)
+    workflow = _replace_placeholders(workflow, {"___CUSTOM_PROMPT___": custom_prompt})
+    load_node = _select_edit_load_image_node(workflow)
+    _set_load_image_value(load_node, base_image)
+    workflow = _randomize_seeds(workflow)
+    return {
+        "client_id": "llm_backend",
+        "prompt": workflow,
+    }
+
+
+def _build_multi_view_payload(target_image: str) -> dict:
+    workflow = _load_workflow_template(MULTI_VIEW_TEMPLATE_PATH)
+    load_node = _select_multi_view_load_image_node(workflow)
+    _set_load_image_value(load_node, target_image)
+    workflow = _randomize_seeds(workflow)
+    return {
+        "client_id": "llm_backend",
+        "prompt": workflow,
+    }
+
+
 def generate_base_image(state: AgentState) -> dict:
-    """ 
-    (Step 1-1) RAG 컨텍스트를 활용해 프롬프트를 짜고 완전 신규 생성 (배경 유지)
-    - birefnet 노드는 제거한 상태 (z-image-turbo 템플릿 사용)
+    """
+    RAG 컨텍스트를 활용해 베이스 반지 이미지를 신규 생성합니다.
     """
     user_prompt = state.get("user_prompt", "")
     rag_context = state.get("rag_context", "")
 
-    logger.info("Enhancing Prompt using Gemma 4 & RAG rules...")
-    
+    logger.info("Enhancing prompt using Gemma 4 & RAG rules...")
+
     llm = ChatOllama(
         model=config.OLLAMA_MODEL,
         base_url=config.OLLAMA_BASE_URL,
-        temperature=0.3
+        temperature=0.3,
     )
-    
+
     sys_prompt = f"""
-You are an expert jewelry prompt engineer for Stable Diffusion. 
+You are an expert jewelry prompt engineer for Stable Diffusion.
 User requested: '{user_prompt}'
 RAG Rules to follow: '{rag_context}'
 
 Your task:
 1. Identify the ring's design and color/material from the user's request.
-2. Based on the RAG rules, calculate the EXACT complementary background color.
-3. Output ONLY a comma-separated keywords prompt. It MUST end with 'solid [COLOR] background'.
-NO conversational text, NO quotes. Just the prompt string.
+2. Based on the RAG rules, calculate the exact complementary background color.
+3. The background must be a flat, single-color, non-textured studio background optimized for clean alpha matting.
+4. Output only a comma-separated keywords prompt. It must end with 'solid [COLOR] background'.
+No conversational text and no quotes.
 """
+
     try:
         resp = llm.invoke([HumanMessage(content=sys_prompt)])
         enhanced_prompt = resp.content.strip()
-        logger.info(f"Gemma 4 Enhanced Prompt: {enhanced_prompt}")
-    except Exception as e:
-        logger.warning(f"Prompt enhancement failed: {e}. Using original prompt.")
-        enhanced_prompt = user_prompt + ", highly detailed, solid dark background"
-        
+        logger.info(f"Gemma 4 enhanced prompt: {enhanced_prompt}")
+    except Exception as exc:
+        logger.warning(f"Prompt enhancement failed: {exc}. Using original prompt.")
+        enhanced_prompt = f"{user_prompt}, highly detailed, solid dark background"
+
     try:
-        # 바탕화면 혹은 프로젝트 경로에 있는 JSON 파일을 직접 로드합니다.
-        # 실제 경로와 노드 번호("57" 등)는 파일에 맞게 수정해두면 됩니다!
-        with open("image_z_image_turbo.json", "r", encoding="utf-8") as f:
-            workflow = json.load(f)
-            
-        # 노드 번호 하드코딩 대신 마법의 키워드(Magic String) 치환 방식 사용!
-        workflow_str = json.dumps(workflow)
-        
-        # 큰따옴표(") 인코딩 이슈를 막기 위해 순수 문자열만 안전하게 추출해서 치환
-        safe_user_prompt = json.dumps(enhanced_prompt)[1:-1]
-        
-        # ComfyUI에서 프롬프트 칸에 ___USER_PROMPT___ 라고 적어두면 파이썬이 알아서 찾아서 바꿉니다.
-        workflow_str = workflow_str.replace("___USER_PROMPT___", safe_user_prompt)
-        
-        # 재시도나 매 생성 시마다 똑같은 이미지가 나오지 않게 하드코딩된 seed 파괴 및 랜덤값 주입
-        workflow_str = re.sub(r'"seed":\s*\d+', f'"seed": {random.randint(1, 2147483647)}', workflow_str)
-        workflow_str = re.sub(r'"noise_seed":\s*\d+', f'"noise_seed": {random.randint(1, 2147483647)}', workflow_str)
-        
-        workflow = json.loads(workflow_str)
-        
-        comfyUI_payload = {
-            "client_id": "llm_backend",
-            "prompt": workflow
+        comfyui_payload = _build_base_payload(enhanced_prompt)
+    except Exception as exc:
+        logger.error(f"Failed to load base ComfyUI template: {exc}")
+        return {
+            "base_ring_image_url": "",
+            "synthesized_prompt": enhanced_prompt,
+            "status_message": "베이스 생성 템플릿 로드에 실패했습니다.",
         }
-    except Exception as e:
-        logger.error(f"Failed to load ComfyUI JSON template: {e}")
-        comfyUI_payload = {}
-        
-    # 실제 생성 루프 대기 후 첫번째 이미지 반환
-    result_urls = _sync_call_comfyui(comfyUI_payload)
+
+    result_urls = _sync_call_comfyui(comfyui_payload)
     final_url = result_urls[0] if result_urls else ""
-    return {"base_ring_image_url": final_url}
+
+    return {
+        "base_ring_image_url": final_url,
+        "synthesized_prompt": enhanced_prompt,
+        "status_message": "베이스 이미지 생성에 실패했습니다." if not final_url else "",
+    }
 
 
 def edit_image(state: AgentState) -> dict:
     """
-    (Step 1-2) 기존 이미지(또는 방금 생성된베이스 이미지)를 기반으로 각인/큐빅 등 커스텀
-    - qwen image edit 템플릿 사용
+    기존 이미지 또는 이전 수정본을 기반으로 커스텀을 반영합니다.
     """
-    base_image = state.get("base_ring_image_url", "")
-    custom_prompt = state.get("customization_prompt", state.get("user_prompt", ""))
-    
-    logger.info(f"Applying Customization (Engraving/Cubic) to image: {base_image}...")
-    
-    try:
-        # 커스텀(Inpainting)용 JSON 파일 로드
-        with open("image_qwen_image_edit_2509.json", "r", encoding="utf-8") as f:
-            workflow = json.load(f)
-            
-        # 노드 번호 하드코딩 완전 제거 (치환 마법)
-        workflow_str = json.dumps(workflow)
-        
-        safe_custom_prompt = json.dumps(custom_prompt)[1:-1]
-        
-        # ComfyUI에서 이미지 경로 값에 ___BASE_IMAGE___, 각인 텍스트 값에 ___CUSTOM_PROMPT___ 기입
-        workflow_str = workflow_str.replace("___BASE_IMAGE___", base_image)
-        workflow_str = workflow_str.replace("___CUSTOM_PROMPT___", safe_custom_prompt)
-        
-        # 재시도 루프 시 동일 결과 방지
-        workflow_str = re.sub(r'"seed":\s*\d+', f'"seed": {random.randint(1, 2147483647)}', workflow_str)
-        workflow_str = re.sub(r'"noise_seed":\s*\d+', f'"noise_seed": {random.randint(1, 2147483647)}', workflow_str)
-        
-        workflow = json.loads(workflow_str)
-        
-        comfyUI_payload = {
-            "client_id": "llm_backend",
-            "prompt": workflow
+    base_image = state.get("edited_ring_image_url") or state.get("base_ring_image_url", "")
+    custom_prompt = state.get("customization_prompt") or state.get("user_prompt", "")
+
+    logger.info(f"Applying customization to image: {base_image}...")
+
+    if not base_image:
+        return {
+            "edited_ring_image_url": "",
+            "synthesized_prompt": custom_prompt,
+            "status_message": "커스텀 편집에 사용할 입력 이미지가 없습니다.",
         }
-    except Exception as e:
-        logger.error(f"Failed to load ComfyUI JSON template: {e}")
-        comfyUI_payload = {}
-        
-    result_urls = _sync_call_comfyui(comfyUI_payload)
+
+    try:
+        comfyui_payload = _build_edit_payload(base_image, custom_prompt)
+    except Exception as exc:
+        logger.error(f"Failed to build edit ComfyUI payload: {exc}")
+        return {
+            "edited_ring_image_url": "",
+            "synthesized_prompt": custom_prompt,
+            "status_message": f"커스텀 편집용 LoadImage 주입에 실패했습니다. ({exc})",
+        }
+
+    result_urls = _sync_call_comfyui(comfyui_payload)
     final_url = result_urls[0] if result_urls else ""
-    return {"edited_ring_image_url": final_url}
+
+    return {
+        "edited_ring_image_url": final_url,
+        "synthesized_prompt": custom_prompt,
+        "status_message": "커스텀 이미지 생성에 실패했습니다." if not final_url else "",
+    }
 
 
 def generate_multi_view(state: AgentState) -> dict:
     """
-    (Step 2) 최종 채택된 이미지로 다각도 생성 + Birefnet (Rembg) 투명 누끼 적용
+    최종 채택된 이미지로 다각도 생성과 배경 제거를 수행합니다.
     """
-    # 편집된 이미지가 있으면 우선 사용, 없으면 베이스 이미지 사용
     target_image = state.get("edited_ring_image_url", "") or state.get("base_ring_image_url", "")
-    
-    logger.info(f"Extracting Multi-views and Applying Birefnet Rembg for Trellis. Target: {target_image}")
-    
-    try:
-        # 다각도 + Birefnet 템플릿 로드
-        with open("templates-1_click_multiple_character_angles-v1.0 (3).json", "r", encoding="utf-8") as f:
-            workflow = json.load(f)
-            
-        # 노드 번호에 의존하지 않고 텍스트 파일 단위로 교체
-        workflow_str = json.dumps(workflow)
-        
-        # ComfyUI 안에서 LoadImage 노드의 이미지 이름 란을 ___TARGET_IMAGE___ 로 설정
-        workflow_str = workflow_str.replace("___TARGET_IMAGE___", target_image)
-        
-        workflow = json.loads(workflow_str)
-        
-        comfyUI_payload = {
-            "client_id": "llm_backend",
-            "prompt": workflow
+
+    logger.info(f"Extracting multi-views and applying Birefnet rembg. Target: {target_image}")
+
+    if not target_image:
+        return {
+            "current_image_urls": [],
+            "status_message": "다각도 생성에 사용할 입력 이미지가 없습니다.",
         }
-    except Exception as e:
-        logger.error(f"Failed to load ComfyUI JSON template: {e}")
-        comfyUI_payload = {}
-        
-    # 다각도 추출의 경우 저장된 이미지가 여러 장이므로 리스트 통째로 반환
-    result_urls = _sync_call_comfyui(comfyUI_payload)
-    
-    return {"current_image_urls": result_urls}
+
+    try:
+        comfyui_payload = _build_multi_view_payload(target_image)
+    except Exception as exc:
+        logger.error(f"Failed to build multi-view ComfyUI payload: {exc}")
+        return {
+            "current_image_urls": [],
+            "status_message": f"다각도용 LoadImage 주입에 실패했습니다. ({exc})",
+        }
+
+    result_urls = _sync_call_comfyui(comfyui_payload)
+
+    return {
+        "current_image_urls": result_urls,
+        "status_message": "다각도 이미지 생성에 실패했습니다." if not result_urls else "",
+    }

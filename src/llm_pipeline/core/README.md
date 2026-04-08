@@ -1,12 +1,19 @@
-# Core 디렉토리 명세 (Harness Engineering)
+# Core 디렉토리 명세
 
-이 디렉토리는 3D 생성 LLM 파이프라인의 **전역 환경설정 사항과 데이터 통신 규격 스키마**를 담당합니다. 외부 요소나 모델 교체 시 이 디렉토리 하위만 수정하면 전체 파이프라인에 반영되도록 응집도를 높여야 합니다.
+`core/` 는 반지 커스텀 파이프라인의 전역 설정과 공용 스키마를 담당합니다.
 
-## 책임 (Responsibilities)
-1. **`config.py`**: `.env` 환경 변수 관리, 기본 모델 태그명 관리(예: Gemma 4 탑재), 백엔드 Webhook 주소 관리.
-2. **`schemas.py`**: 외부 클라이언트나 상위 서버에서 인입되는 초기 Request와, 파이프라인 외부로 방출되는 최종 Response의 구조 명시.
-   - 내부 상태 전이 객체인 `AgentState` 로직 통제.
+## 구성
+- `config.py`
+  - `gemma4:26b` 기본 모델
+  - 로컬 ComfyUI 주소
+  - Chroma DB 경로
+  - `ALLOW_VALIDATION_BYPASS` 검수 정책
+- `schemas.py`
+  - `PipelineRequest`
+  - `PipelineResponse`
+  - `AgentState`
 
-## 제약 사항 (Constraints)
-* 비즈니스 로직(판단 분기 알고리즘이나 API 호출 상세)은 절대 여기에 작성하지 않고 `nodes/` 디렉토리에 위임합니다.
-* 오직 데이터 명세 및 기초 상수만 포함 가능합니다.
+## 규칙
+- 비즈니스 로직은 두지 않습니다.
+- 외부 계약과 환경 설정만 이 레이어에 둡니다.
+- `PipelineRequest.input_type` 는 외부 입력을 받아 내부 canonical 값으로 정규화합니다.

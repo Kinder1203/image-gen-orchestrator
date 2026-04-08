@@ -1,82 +1,59 @@
-# Couple Ring Customization Pipeline Architecture
-해당 문서는 커플링 커스텀 서비스의 핵심인 LangGraph 기반 오케스트레이션 및 ComfyUI 렌더링 파이프라인의 설계 사상을 명세합니다.
+# Ring Customization Pipeline Architecture
 
-## Architecture Highlights
-본 아키텍처는 **LangGraph의 상태 머신 (StateGraph)** 과 **MemorySaver Checkpointer** 를 활용한 Human-in-the-loop 패턴을 기반으로 설계되었습니다. 단순 스크립트 기반 연결이 아닌, 조건과 상황(사용자 승인, 재시도 루프)에 유연하게 대처할 수 있는 견고한 백엔드 구조입니다.
+이 문서는 현재 저장소의 반지 커스텀 파이프라인을 기준으로 LangGraph 오케스트레이션과 ComfyUI 연동 방식을 설명합니다.
 
-### 1. Double Human-in-the-loop (이중 인간 개입 대기)
-LangGraph에서 특정 노드 완료 시점에 파이프라인을 의도적으로 일시 정지(Interrupt)시킵니다.
-* **1차 휴게소 (베이스 생성 후)**: 프롬프트에서 초기 시안이 나왔을 때 멈춥니다. 사용자가 수락(다각도로 직행)할지, 수정(커스텀)할지 묻습니다.
-* **2차 휴게소 (수정본 생성 후)**: 사용자의 의도대로 각인/보석이 잘 삽입되었는지 수정한 뒤 **또 다시 멈춥니다**. 유저가 만족하면 수락(다각도로 직행)하고, 불만족이면 재커스텀을 지시합니다.
+## 시나리오별 주 흐름
+### 1. 텍스트 온리
+- `router -> rag -> generate_base_image -> validate_base_image`
+- `validate_base_image` 는 사용자 요청 반영 여부와 보색/고대비 배경 적합성을 함께 검수
+- 검수 성공 시 `wait_for_user_approval`
+- `accept_base` 이면 `generate_multi_view -> validate_rembg -> end`
+- `request_customization` 이면 `edit_image -> validate_edited_image -> wait_for_edit_approval`
+- 2차 휴게소에서 `accept_base` 이면 `generate_multi_view -> validate_rembg -> end`
+- 2차 휴게소에서 `request_customization` 이면 다시 `edit_image`
 
-### 2. Gemma 4 통합 자가 검열 루프 (Self-correction)
-LangGraph의 Conditional Edge를 이용하여 **최대 3회**의 자가 복구 로직을 구현했습니다.
-* 각각의 생성 노드 바로 뒤에 전담 검수 노드(`validate_base_image`, `validate_edited_image`, `validate_rembg`)가 배치되어 있습니다.
-* 퀄리티 미달로 판정(is_valid: False)되면, LangGraph는 즉시 직전 생성 모델로 회귀시킵니다. 3회가 넘어갈 경우 무한 루프 방지를 위해 종료(Failed) 처리합니다.
+### 2. 이미지 기반 커스텀
+- `router -> validate_input_image -> edit_image -> validate_edited_image`
+- 검수 성공 시 `wait_for_edit_approval`
+- `accept_base` 이면 `generate_multi_view -> validate_rembg -> end`
+- `request_customization` 이면 다시 `edit_image`
 
-### 3. 무사고 배경 누끼(Rembg) 자가 치유 아키텍처
-* **시나리오 1**: RAG DB의 '초강력 보색(Complementary Color) 규칙'을 바탕으로 Gemma 4가 ComfyUI 렌더링 프롬프트를 자동으로 조작하여, 반지에 맞는 완벽한 보색 배경을 세팅합니다.
-* **시나리오 2 & 3 가드레일**: 사용자가 업로드한 시안 이미지의 배경(예: 흰색 반지 + 흰색 배경)이 누끼에 치명적일 경우, **`validate_input_image`** 노드가 사전 적발합니다. 에러를 뱉는 대신, 강제로 `edit_image` 노드로 가로채서(Intercept) Qwen 모델에게 배경색 교체를 스스로 지시한 뒤 다음 단계로 넘어가는 자동화(Agentic Workflows)를 달성했습니다.
+### 3. 다각도 즉시 추출
+- `router -> validate_input_image -> generate_multi_view -> validate_rembg -> end`
+- 기본적으로 휴게소 없음
+- 다만 `validate_input_image` 가 `배경 대비 문제` 로 실패하면 내부 보정용으로 `edit_image -> validate_edited_image -> generate_multi_view` 를 타고, 이 경로에서도 사용자 interrupt 는 만들지 않습니다.
+- `validate_input_image` 가 이미지 다운로드 실패나 Vision 검수 오류 같은 `시스템 오류` 로 실패하면 내부 보정을 시도하지 않고 즉시 실패 처리합니다.
 
----
+## 내부 가드레일
+- 시나리오 1의 `validate_base_image` 와 시나리오 2/3의 `validate_input_image` 는 같은 보색/고대비 배경 원칙을 공유합니다.
+- `validate_input_image` 는 시나리오 2/3 에서만 동작합니다.
+- `validate_input_image` 의 결과는 `pass`, `repair_required`, `system_error` 세 가지 의미로 해석합니다.
+- 시나리오 2 에서는 보정 edit 가 발생해도 최종적으로 `wait_for_edit_approval` 로 갑니다.
+- 시나리오 3 에서는 보정 edit 가 발생해도 곧바로 `generate_multi_view` 로 복귀합니다.
 
-## 파이프라인 진행 플로우 (The Workflow)
+## 요청/응답 계약
+- 입력 타입은 외부에서 `text`, `image`, `modification`, `image_only`, `image_and_text` 를 허용합니다.
+- 내부 canonical 값은 `text`, `image_only`, `image_and_text` 입니다.
+- `action=start` 는 `prompt` 또는 `image_url` 중 하나 이상이 필요합니다.
+- `action=request_customization` 는 비어 있지 않은 `customization_prompt` 가 필요합니다.
+- 휴게소 상태는 `waiting_for_user`, `waiting_for_user_edit` 두 종류입니다.
+- 버튼 의미는 고정입니다.
+  - `합격 -> accept_base`
+  - `각인 수정/재수정 -> request_customization`
 
-### Step 1: Input & Routing (의도 파악 및 사전 검수)
-- **`router.py`**: 입력 데이터(텍스트 단독, 이미지 단독, 이미지+텍스트)를 판단하여 `full_custom`, `multi_view_only`, `partial_modification` 3가지 분기 중 하나로 연결시킵니다.
-- **`validate_input_image` (시나리오 2, 3 전용)**: 업로드된 이미지의 배경색이 누끼(Birefnet) 추출에 안전한지 검사합니다. 통과하지 못하면 Gemma 4가 배경 교체 프롬프트를 작성하여 강제로 Step 3(`edit_image`)로 경로를 꺾습니다.
+## ComfyUI 연동 원칙
+- JSON 파일은 ComfyUI 에서 export 한 artifact 로 취급합니다.
+- 런타임은 workflow JSON 을 읽은 뒤 메모리상 객체만 수정합니다.
+- prompt 는 기존 텍스트 치환 방식으로 주입합니다.
+- 이미지 입력은 `LoadImage.widgets_values[0]` 를 런타임에서 교체합니다.
+- edit workflow 는 `LoadImage` 노드가 정확히 1개여야 합니다.
+- multi-view workflow 는 title 이 `Load Character Image` 인 `LoadImage` 노드를 우선 사용하고, 없으면 `LoadImage` 가 1개일 때만 사용합니다.
+- 후보가 여러 개인데 고를 수 없으면 명시적으로 실패합니다.
 
-### Step 2: RAG & Base Generation (초기 시안 제작)
-*(텍스트만 입력되었을 경우)*
-- **`rag.py`**: Chroma DB에서 18k 프래티넘, 각인 등의 전문 지식과 프롬프트 가이드를 검색합니다.
-- **`generate_base_image`**: `z-image-turbo` 형식을 사용하여, 배경이 존재하는 고품질의 반지 이미지를 **1장** 만듭니다. (Rembg 미적용)
-- **`validate_base_image`**: Gemma 4 가 프롬프트 요구사항 반영 여부를 확인합니다.
-- **[정지 지점]**: 여기서 멈춰 사용자에게 반지를 보여주고 응답을 기다립니다.
-
-### Step 3: Customization (커스텀 합성)
-*(사용자가 추가 각인이나 큐빅을 요구하거나, 초기부터 공방 시안을 입력한 경우)*
-- **`edit_image`**: `qwen_image_edit` 형식을 사용하여 기존 반지의 기하학적 형태는 유지한 채 사용자가 입력한 프롬프트를 바탕으로 합성합니다.
-- **`validate_edited_image`**: 수정된 사항이 잘 들어갔는지 다시 Gemma 4가 검수합니다.
-
-### Step 4: Multi-view & Rembg (다각도 분해 및 투명화)
-*(사용자 승인이 떨어졌거나, 커스텀이 완료된 최종 시안을 대상으로)*
-- **`generate_multi_view`**: ComfyUI 다중 각도 렌더링을 지시하고, 핵심적으로 **birefnet 노드**를 태워 배경과 **반지 안쪽 공간을 완전히 투명화** 시킵니다.
-- **`validate_rembg`**: Gemma 4 가 누끼가 완벽히 따졌는지(반지 링 안쪽까지) 까다롭게 검수합니다.
-
-### Step 5: Webhook Dispatch
-모든 검수와 다각도 추출이 끝났다면, 메인 렌더링 서버(onrender.com) 의 Webhook으로 투명화된 다각도 이미지들을 조용히 밀어넣습니다.
-
----
-
-## 실행 및 테스트 방법
-
-### 1. 지식 DB 가동
-처음 1회는 반지 도메인 지식을 DB화해야 합니다.
-```bash
-python -m src.llm_pipeline.scripts.db_feeder
-```
-
-### 2. 로컬 API 테스트 가동
-해당 파이프라인의 접점은 `pipelines.py` 의 `process_generation_request` 입니다.
-Mocking된 FastAPI 환경이나 스트립트를 통해 다음과 같은 페이로드를 날리면 구동됩니다:
-
-**처음 시작할 때:**
-```json
-{
-    "thread_id": "user_id_123",
-    "action": "start",
-    "input_type": "text",
-    "prompt": "18k 로즈골드에 우아한 곡선이 들어간 커플링"
-}
-```
-결과는 `waiting_for_user` 상태가 반환됩니다.
-
-**사용자가 커스텀 추가를 클릭했을 때:**
-```json
-{
-    "thread_id": "user_id_123",
-    "action": "request_customization",
-    "customization_prompt": "내부에 Forever 라고 각인 새겨줘"
-}
-```
-LangGraph는 MemorySaver에 저장해두었던 `user_id_123` 스레드를 깨워서, 멈춰있던 커스텀 편집 노드부터 알아서 이어 나갑니다!
+## 검수 정책
+- 기본 정책은 fail-closed 입니다.
+- 배경 검수는 반지 재질과 배경색의 분리 가능성을 직접 확인합니다. 흰 반지 on 흰 배경 같은 케이스는 명시적으로 실패 처리합니다.
+- 입력 이미지 가드레일에서 시스템 오류가 발생하면 내부 보정 경로로 넘기지 않고 즉시 실패 처리합니다. 개발 중에만 `ALLOW_VALIDATION_BYPASS=true` 로 우회할 수 있습니다.
+- 이미지 다운로드 실패, Vision LLM 오류, 빈 multi-view 결과는 기본적으로 실패 처리합니다.
+- `.env` 에서 `ALLOW_VALIDATION_BYPASS=true` 를 줄 때만 Vision 검수 오류를 개발용으로 우회합니다.
+- 최종 성공 응답은 `is_valid=True` 이고 결과 이미지가 1장 이상일 때만 반환합니다.

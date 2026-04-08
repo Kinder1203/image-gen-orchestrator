@@ -1,21 +1,16 @@
-# 🧠 Nodes Module (Business Logic Layer)
+# Nodes Module
 
-## [핵심 변경: LangGraph 분할 정복 & 상태 루프]
-아키텍처가 고도화됨에 따라 기존의 비대했던 2개의 노드가, 목적이 뚜렷한 6개의 마이크로 노드 구조로 분할되었습니다.
+`nodes/` 는 반지 커스텀 파이프라인의 실제 비즈니스 로직 레이어입니다.
 
-### 노드 목록
-* `router.py`: 의도 분류 및 분기점 (Condition Edge 연결용)
-* `rag.py`: Chroma DB 지식 검색
-* `synthesizer.py`: ComfyUI JSON 조합 및 호출
-    - `generate_base_image`: 초기 생성 (Text2Img)
-    - `edit_image`: 유저 커스텀 수정 (Inpainting)
-    - `generate_multi_view`: 다각도 추출 및 Birefnet (Rembg)
-* `validator.py`: Gemma 4 Vision 봇
-    - `validate_base_image`: 초기 퀄리티 체크
-    - `validate_edited_image`: 각인/보석 적용 여부 체크
-    - `validate_rembg`: 누끼(알파채널) 및 빈 공간 타공 체크
+## 노드 목록
+- `router.py`: 요청 형태를 보고 흐름 분기
+- `rag.py`: 반지 도메인 Vector RAG
+- `synthesizer.py`: exported ComfyUI JSON 을 읽어 런타임에서 prompt/image 를 주입하고 호출
+- `validator.py`: `gemma4` 기반 Vision 검수와 입력 이미지 가드레일, 보색 배경 검수
 
-## 제약 사항 ⚠️ (하네스 원칙)
-1. **노드 간 직접 호출 금지**: 노드는 서로를 `import` 해서 함수처럼 부르면 안 됩니다. 모든 연결은 `agent.py` 의 LangGraph가 통제합니다.
-2. **State 변형 금지**: 노드는 오직 자신에게 허용된 필드(예: `is_valid`, `retry_count`)만 업데이트해야 합니다.
-3. **무한 루프 방지**: 모든 Validator 노드는 `retry_count`를 읽고 카운팅을 올려 반환해야 합니다. `agent.py`가 3회 이상일 때 루프를 강제 종료합니다.
+## 현재 설계 원칙
+- 노드끼리 직접 호출하지 않고 `agent.py` 의 LangGraph 가 흐름을 제어합니다.
+- 시나리오 3의 내부 가드레일 보정은 사용자 휴게소를 만들지 않습니다.
+- JSON workflow 파일은 repo 에서 수정하지 않고 메모리상에서만 `LoadImage.widgets_values[0]` 를 교체합니다.
+- 시나리오 1 생성 검수와 시나리오 2/3 입력 검수는 같은 배경 대비 원칙을 공유합니다.
+- 입력 이미지 가드레일은 `배경 보정 필요` 와 `검수 시스템 오류` 를 구분하고, 시스템 오류는 보정 edit 로 우회하지 않습니다.

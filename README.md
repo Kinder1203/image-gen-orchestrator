@@ -1,75 +1,105 @@
-# 👟 커스텀 신발 다각도(Multi-Angle) 3D 생성 서비스 LLM 백엔드
+# 반지 커스텀 다각도 3D 생성용 LLM 백엔드
 
-> **업데이트 포인트 (최종 아키텍처 최적화):** 3D 변환(TRELLIS / Gaussian Splatting)의 성공률을 극대화하고 서버 지연 시간(Latency)을 단축하기 위해 아키텍처를 전면 리팩토링했습니다. 불필요한 중복 연산(Rembg 전처리)과 무거운 추론(Graph DB)을 도려내고, LangGraph 기반의 **'자가 수정(Self-Healing)을 갖춘 지능형 데이터 정수기(Data Purifier)'**로 진화했습니다.
+LangGraph 기반으로 반지 시안 생성, 커스텀 편집, 다각도 추출, Vision 검수를 오케스트레이션하는 백엔드 워커입니다. 현재 프로젝트의 기준 도메인은 `반지` 이고, 기본 모델은 `gemma4:26b` 입니다.
 
----
+## 핵심 시나리오
+- `text`
+  - `RAG -> 1차 생성 -> 검수 -> 1차 휴게소`
+  - 유저가 `합격` 하면 `다각도 생성 -> 검수 -> 종료`
+  - 유저가 `각인 수정` 을 누르면 `수정 -> 검수 -> 2차 휴게소`
+  - 2차 휴게소에서 `합격` 시 `다각도 생성 -> 검수 -> 종료`
+- `image_and_text`
+  - `1단계 스킵 -> 수정 -> 검수 -> 2차 휴게소`
+  - 유저가 `합격` 하면 `다각도 생성 -> 검수 -> 종료`
+  - 유저가 `재수정` 하면 다시 수정 루프로 진입
+- `image_only`
+  - `1, 2단계 스킵 -> 다각도 생성 -> 검수 -> 종료`
+  - 기본적으로 휴게소 없음
 
-## 1. 노드 다이어그램 및 설계 의도 (Architecture)
+`validate_input_image` 같은 배경/누끼 가드레일은 시나리오 2/3 진입 전에만 동작하는 내부 보정 단계입니다. 여기서 내부 보정은 배경 대비 문제가 명확할 때만 수행하고, 이미지 다운로드 실패나 Vision LLM 오류 같은 시스템 오류는 보정으로 위장하지 않고 즉시 실패 처리합니다. 특히 `image_only` 에서 내부 보정용 `edit_image` 를 타더라도 사용자 휴게소를 추가하지 않습니다.
+시나리오 1의 `validate_base_image` 도 이제 반지 요청 반영 여부뿐 아니라, 배경이 반지 재질과 충분히 보색/고대비인지 함께 검수합니다.
 
-우리의 백엔드는 LangGraph를 뼈대로 삼아, 통제되지 않은 사용자 입력을 3D 엔진용 무결점 데이터로 변환하는 4단계 오케스트레이터입니다.
-
-* **[Step 1] `Router (의도 판별)`**: 사용자 입력(텍스트/이미지)을 가벼운 조건문(Rule-based)으로 0.1초 만에 즉각 분류하여 불필요한 LLM 호출 대기를 없앱니다.
-* **[Step 2] `Vector RAG (지식 검색 및 규칙 주입)`**: 사용자가 "스포티한 런닝화"라고 모호하게 입력해도, Vector DB를 탐색하여 3D 렌더링에 필수적인 '구체적 시각 묘사'와 '다각도 통제 규칙(Azimuth, 조명)'을 즉시 프롬프트에 강제 주입합니다.
-* **[Step 3] `Synthesizer (ComfyUI Batch Rendering)`**: 조립된 정밀 프롬프트를 로컬 GPU의 ComfyUI 서버로 비동기 전송하여, 3D 입체감 추론에 필요한 핵심 3면(정면, 측면, 후면) 이미지를 배치로 빠르게 생성합니다.
-* **[Step 4] `Validator (Vision LLM 종합 QA)`**: 최종 생성된 3장의 이미지를 LLaVA 등의 Vision LLM이 검수합니다. "배경 노이즈가 없는가?(물리 조건)"와 "사용자가 요구한 디자인이 정확히 반영되었는가?(의미론적 일치도)"를 채점합니다. 
-    * *💡 합격 시 팀의 TRELLIS 3D 서버로 데이터 이관, 불합격 시 LangGraph가 Step 3로 돌아가 스스로 재시도(Self-Healing)합니다.*
-
----
-
-## 2. 🚨 코드 로직 정합성 평가 및 잔존 결함 해결 (Troubleshooting)
-
-실제 프로덕션 서버(마이크로서비스 환경)로 통합하기 전, 아래 3가지 구현 과제를 해결해야 합니다.
-
-* **결함 1: ComfyUI 서버와의 `비동기 WebSocket` 동기화 (`nodes/synthesizer.py`)**
-    * **해결 과제:** HTTP POST 큐(Queue) 등록만으로는 렌더링 완료 시점을 알 수 없습니다. `websocket-client` 라이브러리를 활용해 `ws://127.0.0.1:8188/ws`에 연결하고, `prompt_id`의 실행 완료(`executed`) 이벤트를 수신한 뒤에 파일 URL을 가져오도록 동기화 로직을 보완해야 합니다.
-* **결함 2: Vision LLM을 위한 로컬 이미지 `Base64` 인코딩 (`nodes/validator.py`)**
-    * **해결 과제:** 로컬 환경에서 생성된 `.png` 파일의 경로만으로는 Vision 모델이 이미지를 볼 수 없습니다. 파이썬 `base64` 라이브러리로 이미지를 읽어 `data:image/png;base64,...` 포맷으로 변환한 뒤 `HumanMessage` 배열에 포함하는 I/O 로직을 구현해야 합니다.
-* **결함 3: Vector RAG 전용 DB 피더(Feeder) 활성화 (`scripts/db_feeder.py`)**
-    * **해결 과제:** 기존 Graph DB(Kuzu) 연동 코드를 완전히 덜어내고, Qwen 다각도 제어 가이드 텍스트를 고차원 벡터로 임베딩하여 Chroma DB에 `add_documents()` 하는 코드를 주석 해제 및 활성화해야 합니다.
-
----
-
-## 3. 🚀 실행 가이드라인 (How to Run)
-
-본 파이프라인은 메인 웹 서버(FastAPI) 및 3D 렌더링 서버(TRELLIS)와 독립적으로 구동되는 LLM 전용 백엔드 워커(Worker)입니다.
-
-### Step 1: 환경 세팅 및 의존성 설치
+## 설치
 ```bash
-pip install -r src/llm_pipeline/requirements.txt
+pip install -r requirements.txt
 ```
-*(참고: `rembg` 및 Graph DB 관련 무거운 의존성은 요구사항에서 제외되었습니다.)*
 
-`.env` 환경 변수 세팅:
+## 환경 변수
 ```env
-OLLAMA_MODEL=qwen2.5:14b 
-OLLAMA_VISION_MODEL=llava
+OLLAMA_MODEL=gemma4:26b
 OLLAMA_BASE_URL=http://localhost:11434
+COMFYUI_URL=http://127.0.0.1:8188
 VECTOR_DB_PATH=./data/chroma_db
+WEBHOOK_URL=https://graduation-work-backend.onrender.com/api/model-result
+ALLOW_VALIDATION_BYPASS=false
 ```
 
-### Step 2: 엔진 가동 및 DB 초기화
-1.  **Ollama 활성화:** 터미널에서 `ollama run qwen2.5:14b` 및 `ollama run llava`를 실행하여 텍스트 추론 및 시각 검수 모델을 메모리에 로드합니다.
-2.  **Vector DB 주입:** `python src/llm_pipeline/scripts/db_feeder.py`를 실행해 3D 제어 지식을 Chroma DB에 임베딩합니다.
-3.  **ComfyUI 대기:** 로컬 환경의 `run_nvidia_gpu.bat`을 실행하여 127.0.0.1:8188 포트에서 렌더링 엔진을 대기시킵니다.
+`ALLOW_VALIDATION_BYPASS=true` 를 주면 Vision 검수 오류를 개발용으로만 우회할 수 있습니다. 기본값은 `false` 입니다.
 
-### Step 3: 파이프라인 호출 (Entrypoint)
-FastAPI 라우터 내부에서 다음과 같이 호출하여 백엔드 파이프라인을 비동기로 구동합니다.
+## 백엔드 연동
+- 파이프라인 본체는 최종 `success` 응답 시 `WEBHOOK_URL` 로 결과를 POST 하도록 구현되어 있습니다.
+- 기본 설정은 `https://graduation-work-backend.onrender.com/api/model-result` 입니다.
+- 데모용 `test_run.py` 는 로컬 확인 전용이라 실행 시작 시 `config.WEBHOOK_URL = "NONE"` 으로 바꿔서 전송을 막습니다.
+- 실제 백엔드 연동 테스트를 하려면 `test_run.py` 를 쓰지 말고, 앱 서버나 별도 호출 코드에서 `process_generation_request()` 를 사용하거나 `test_run.py` 의 해당 줄을 비활성화해야 합니다.
 
+## ComfyUI JSON 취급 원칙
+- `image_z_image_turbo.json`
+- `image_qwen_image_edit_2509.json`
+- `templates-1_click_multiple_character_angles-v1.0 (3).json`
+
+이 파일들은 ComfyUI 에서 export 한 workflow snapshot 으로 취급합니다. 저장소에서는 JSON 자체를 수정하지 않고, Python 런타임이 파일을 읽은 뒤 메모리상에서 prompt 값과 `LoadImage.widgets_values[0]` 만 동적으로 주입해서 ComfyUI 로 전송합니다.
+
+## 실행 준비
+1. Ollama 에 `gemma4:26b` 를 준비합니다.
+2. ComfyUI 를 로컬에서 띄웁니다.
+3. 처음 1회는 벡터 DB 를 적재합니다.
+
+```bash
+python -m src.llm_pipeline.scripts.db_feeder
+```
+
+`db_feeder.py` 는 전용 Chroma 컬렉션을 새로 채우는 방식으로 동작하므로, 다시 실행해도 같은 규칙이 중복 적재되지 않습니다. 현재는 반지 재질, 보색 배경, 각인, 수정, 다각도, rembg 검수 규칙을 묶어서 적재합니다.
+
+## 사용 예시
 ```python
-from llm_pipeline.pipelines import process_generation_request
-from llm_pipeline.core.schemas import PipelineRequest
+from src.llm_pipeline.core.schemas import PipelineRequest
+from src.llm_pipeline.pipelines import process_generation_request
 
-# 1. 프론트엔드에서 넘어온 사용자 입력을 Pydantic으로 엄격히 검증
-req_box = PipelineRequest(
+request = PipelineRequest(
     input_type="text",
-    prompt="사이버펑크 느낌의 네온 포인트가 들어간 하이탑 스니커즈"
+    prompt="18k 화이트골드에 얇은 곡선 각인이 들어간 커플링",
 )
 
-# 2. 파이프라인 구동: Router -> Vector RAG -> ComfyUI -> Vision Validator (필요시 자동 재시도)
-result = process_generation_request(req_box)
+result = process_generation_request(request)
 
-# 3. 무결점 데이터 반환
 if result.status == "success":
-    print("3D 변환용 정규화 다각도 이미지:", result.optimized_image_urls)
-    # >>> 이 3장의 이미지 리스트를 TRELLIS 3D 서버 API로 전송합니다.
+    print(result.optimized_image_urls)
+elif result.status == "waiting_for_user":
+    print(result.base_image_url)
 ```
+
+## 입력 타입 정규화
+외부에서는 아래 값을 모두 받을 수 있지만 내부에서는 payload 형태 기준으로 정규화됩니다.
+
+- `text`
+- `image`
+- `modification`
+- `image_only`
+- `image_and_text`
+
+정규화 규칙은 아래와 같습니다.
+
+- `image_url` 없음 + `prompt` 있음: `text`
+- `image_url` 있음 + `prompt` 없음: `image_only`
+- `image_url` 있음 + `prompt` 있음: `image_and_text`
+
+추가로 입력 계약은 아래를 따릅니다.
+
+- `action="start"` 는 `prompt` 또는 `image_url` 중 하나 이상이 반드시 있어야 합니다.
+- `action="request_customization"` 는 `customization_prompt` 가 반드시 있어야 합니다.
+
+## Human-in-the-loop 상태
+- `waiting_for_user`: 베이스 반지 시안 검토 대기
+- `waiting_for_user_edit`: 커스텀 반영본 검토 대기
+- `success`: 최종 다각도 이미지 생성 완료
+- `failed`: 생성 또는 검수 실패

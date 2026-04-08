@@ -24,8 +24,12 @@ def check_base_validation(state: AgentState) -> str:
 def check_edit_validation(state: AgentState) -> str:
     is_valid = state.get("is_valid", False)
     retries = state.get("retry_count", 0)
+    intent = state.get("intent", "")
     
     if is_valid:
+        # 시나리오 3에서 guardrail 때문에 내부 edit를 탄 경우에는 휴게소 없이 곧바로 다각도로 복귀
+        if intent == "multi_view_only":
+            return "generate_multi_view"
         return "wait_for_edit_approval"
     
     if retries >= 3:
@@ -61,13 +65,17 @@ def route_after_approval(state: AgentState) -> str:
 def check_input_image_processing(state: AgentState) -> str:
     """ 시나리오 2 & 3 에서 업로드된 이미지의 시각적 검증 통과 결과에 따라 분기 """
     original_intent = state.get("intent", "")
-    is_valid = state.get("is_valid", True)
+    guardrail_result = state.get("guardrail_result", "pass")
     
-    # 누끼에 치명적인 배경색이라면, Gemma가 적어준 배경 변경 프롬프트를 들고 강제로 edit_image로 끌고 감!
-    if not is_valid:
+    # 시스템 오류는 배경 보정으로 위장하지 않고 즉시 실패 처리한다.
+    if guardrail_result == "system_error":
+        return "end"
+
+    # 배경 대비 문제가 명확할 때만 내부 보정 edit로 보낸다.
+    if guardrail_result == "repair_required":
         return "edit_image"
         
-    # 정상적인 배경색이라면 원래 유저가 원하던 분기로 알아서 보내줌
+    # 정상 통과 또는 개발용 우회라면 원래 유저가 원하던 분기로 보낸다.
     if original_intent == "partial_modification":
         return "edit_image"
     return "generate_multi_view"
@@ -117,7 +125,8 @@ def build_ring_generation_graph():
         check_input_image_processing,
         {
             "edit_image": "edit_image",
-            "generate_multi_view": "generate_multi_view"
+            "generate_multi_view": "generate_multi_view",
+            "end": END,
         }
     )
     
@@ -151,6 +160,7 @@ def build_ring_generation_graph():
         check_edit_validation,
         {
             "wait_for_edit_approval": "wait_for_edit_approval",
+            "generate_multi_view": "generate_multi_view",
             "edit_image": "edit_image",
             "end": END
         }
