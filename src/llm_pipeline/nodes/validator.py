@@ -1,6 +1,7 @@
 import base64
 import json
 import logging
+from urllib.parse import quote
 
 import requests
 from langchain_core.messages import HumanMessage
@@ -39,7 +40,12 @@ def _encode_image_from_url(image_url: str) -> str:
         return ""
 
     try:
-        response = requests.get(image_url, timeout=10)
+        resolved_url = image_url
+        if not image_url.startswith(("http://", "https://")):
+            # Uploaded ComfyUI input images are often passed around as plain filenames.
+            resolved_url = f"{config.COMFYUI_URL.rstrip('/')}/view?filename={quote(image_url)}&type=input"
+
+        response = requests.get(resolved_url, timeout=10)
         response.raise_for_status()
         return base64.b64encode(response.content).decode("utf-8")
     except Exception as exc:
@@ -100,6 +106,17 @@ def validate_base_image(state: AgentState) -> dict:
     user_prompt = state.get("user_prompt", "")
     synthesized_prompt = state.get("synthesized_prompt", "")
     retry_count = state.get("retry_count", 0)
+    generation_result = state.get("generation_result", "")
+
+    if generation_result == "system_error" or not target_img:
+        reason = state.get("status_message", "베이스 이미지 생성 시스템 오류가 발생했습니다.")
+        return {
+            "is_valid": False,
+            "generation_result": "system_error",
+            "validation_reason": reason,
+            "retry_count": retry_count,
+            "status_message": reason,
+        }
 
     sys_prompt = (
         "You are a jewelry generation judge. "
@@ -130,6 +147,17 @@ def validate_edited_image(state: AgentState) -> dict:
     target_img = state.get("edited_ring_image_url", "")
     custom_prompt = state.get("customization_prompt") or state.get("user_prompt", "")
     retry_count = state.get("retry_count", 0)
+    generation_result = state.get("generation_result", "")
+
+    if generation_result == "system_error" or not target_img:
+        reason = state.get("status_message", "커스텀 이미지 생성 시스템 오류가 발생했습니다.")
+        return {
+            "is_valid": False,
+            "generation_result": "system_error",
+            "validation_reason": reason,
+            "retry_count": retry_count,
+            "status_message": reason,
+        }
 
     sys_prompt = (
         "Does the image accurately apply the requested modifications: "
@@ -155,6 +183,18 @@ def validate_rembg(state: AgentState) -> dict:
     """다각도 분리 및 반지 안쪽 빈 공간 투명화가 완벽한지 판별"""
     urls = state.get("current_image_urls", [])
     retry_count = state.get("retry_count", 0)
+    generation_result = state.get("generation_result", "")
+
+    if generation_result == "system_error":
+        reason = state.get("status_message", "다각도 생성 시스템 오류가 발생했습니다.")
+        return {
+            "is_valid": False,
+            "generation_result": "system_error",
+            "validation_reason": reason,
+            "retry_count": retry_count,
+            "final_output_urls": [],
+            "status_message": reason,
+        }
 
     sys_prompt = (
         "You are a TRELLIS preparation judge. Look at this ring image. "

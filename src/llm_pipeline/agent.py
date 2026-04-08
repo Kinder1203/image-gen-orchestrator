@@ -12,6 +12,10 @@ from .nodes.validator import validate_base_image, validate_edited_image, validat
 def check_base_validation(state: AgentState) -> str:
     is_valid = state.get("is_valid", False)
     retries = state.get("retry_count", 0)
+    generation_result = state.get("generation_result", "")
+
+    if generation_result == "system_error":
+        return "end"
     
     if is_valid:
         # 합격하면 사용자 승인 대기 전용 빈 노드로 이동
@@ -25,6 +29,10 @@ def check_edit_validation(state: AgentState) -> str:
     is_valid = state.get("is_valid", False)
     retries = state.get("retry_count", 0)
     intent = state.get("intent", "")
+    generation_result = state.get("generation_result", "")
+
+    if generation_result == "system_error":
+        return "end"
     
     if is_valid:
         # 시나리오 3에서 guardrail 때문에 내부 edit를 탄 경우에는 휴게소 없이 곧바로 다각도로 복귀
@@ -39,6 +47,10 @@ def check_edit_validation(state: AgentState) -> str:
 def check_rembg_validation(state: AgentState) -> str:
     is_valid = state.get("is_valid", False)
     retries = state.get("retry_count", 0)
+    generation_result = state.get("generation_result", "")
+
+    if generation_result == "system_error":
+        return "end"
     
     if is_valid:
         return "end"

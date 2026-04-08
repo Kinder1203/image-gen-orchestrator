@@ -3,6 +3,7 @@ import logging
 import random
 import time
 from pathlib import Path
+from urllib.parse import urlencode
 from typing import Optional
 
 import requests
@@ -16,18 +17,42 @@ logger = logging.getLogger(__name__)
 
 COMFY_URL = config.COMFYUI_URL.rstrip("/")
 
-BASE_TEMPLATE_PATH = Path("image_z_image_turbo.json")
-EDIT_TEMPLATE_PATH = Path("image_qwen_image_edit_2509.json")
-MULTI_VIEW_TEMPLATE_PATH = Path("templates-1_click_multiple_character_angles-v1.0 (3).json")
+
+def _resolve_template_path(*candidates: str) -> Path:
+    for candidate in candidates:
+        path = Path(candidate)
+        if path.exists():
+            return path
+    raise FileNotFoundError(f"None of the ComfyUI template files were found: {', '.join(candidates)}")
 
 
-def _sync_call_comfyui(payload: dict) -> list[str]:
+BASE_TEMPLATE_PATH = _resolve_template_path("image_z_image_turbo (2).json", "image_z_image_turbo.json")
+EDIT_TEMPLATE_PATH = _resolve_template_path("image_qwen_image_edit_2509.json")
+MULTI_VIEW_TEMPLATE_PATH = _resolve_template_path("templates-1_click_multiple_character_angles-v1.0 (3).json")
+
+
+def _truncate_text(text: str, max_len: int = 400) -> str:
+    compact = " ".join((text or "").split())
+    if len(compact) <= max_len:
+        return compact
+    return f"{compact[:max_len]}..."
+
+
+def _comfy_result(image_urls: Optional[list[str]] = None, error_message: str = "") -> dict:
+    return {
+        "image_urls": image_urls or [],
+        "error_message": error_message,
+    }
+
+
+def _sync_call_comfyui(payload: dict) -> dict:
     """
-    ComfyUI에 프롬프트를 전송하고, 완료된 산출물의 이미지 URL 목록을 반환합니다.
+    ComfyUI에 프롬프트를 전송하고, 완료된 산출물의 이미지 URL 목록 또는 명시적 오류를 반환합니다.
     """
     if not payload:
-        logger.error("ComfyUI payload is empty.")
-        return []
+        error_message = "ComfyUI payload is empty."
+        logger.error(error_message)
+        return _comfy_result(error_message=error_message)
 
     try:
         response = requests.post(f"{COMFY_URL}/prompt", json=payload, timeout=10)
@@ -35,8 +60,9 @@ def _sync_call_comfyui(payload: dict) -> list[str]:
         prompt_id = response.json().get("prompt_id")
 
         if not prompt_id:
-            logger.error("Failed to get prompt_id from ComfyUI.")
-            return []
+            error_message = "ComfyUI /prompt succeeded but prompt_id was missing from the response."
+            logger.error(error_message)
+            return _comfy_result(error_message=error_message)
 
         logger.info(f"Sent workflow to ComfyUI. Waiting for generation... (Prompt ID: {prompt_id})")
 
@@ -51,21 +77,63 @@ def _sync_call_comfyui(payload: dict) -> list[str]:
 
                 for out_data in outputs.values():
                     for img in out_data.get("images", []):
-                        filename = img["filename"]
-                        image_urls.append(f"{COMFY_URL}/view?filename={filename}")
+                        query = urlencode(
+                            {
+                                "filename": img["filename"],
+                                "subfolder": img.get("subfolder", ""),
+                                "type": img.get("type", "output"),
+                            }
+                        )
+                        image_urls.append(f"{COMFY_URL}/view?{query}")
 
-                return image_urls
+                if not image_urls:
+                    error_message = "ComfyUI completed the workflow but returned no image outputs in /history."
+                    logger.error(error_message)
+                    return _comfy_result(error_message=error_message)
+
+                return _comfy_result(image_urls=image_urls)
 
             time.sleep(2.0)
 
+    except requests.HTTPError as exc:
+        status_code = exc.response.status_code if exc.response is not None else "unknown"
+        response_body = _truncate_text(exc.response.text if exc.response is not None else "")
+        error_message = f"ComfyUI request failed with HTTP {status_code}"
+        if response_body:
+            error_message += f": {response_body}"
+        logger.error(error_message)
+        return _comfy_result(error_message=error_message)
+    except requests.RequestException as exc:
+        error_message = f"ComfyUI request failed: {exc}"
+        logger.error(error_message)
+        return _comfy_result(error_message=error_message)
     except Exception as exc:
-        logger.error(f"ComfyUI Polling Error: {exc}")
-        return []
+        error_message = f"Unexpected ComfyUI execution error: {exc}"
+        logger.error(error_message)
+        return _comfy_result(error_message=error_message)
 
 
 def _load_workflow_template(template_path: Path) -> dict:
     with template_path.open("r", encoding="utf-8") as file:
         return json.load(file)
+
+
+def _is_api_prompt_template(workflow: dict) -> bool:
+    if not isinstance(workflow, dict) or not workflow:
+        return False
+    return all(
+        isinstance(node, dict) and "class_type" in node and "inputs" in node
+        for node in workflow.values()
+    )
+
+
+def _require_api_prompt_template(workflow: dict, template_name: str) -> dict:
+    if _is_api_prompt_template(workflow):
+        return workflow
+    raise ValueError(
+        f"{template_name} is not a ComfyUI API-format prompt JSON. "
+        "Expected top-level node ids mapped to {class_type, inputs}."
+    )
 
 
 def _replace_placeholders(node: object, replacements: dict[str, str]) -> object:
@@ -95,20 +163,28 @@ def _randomize_seeds(node: object) -> object:
     return node
 
 
-def _collect_load_image_nodes(workflow: dict) -> list[dict]:
-    return [node for node in workflow.get("nodes", []) if node.get("type") == "LoadImage"]
+def _collect_load_image_nodes(workflow: dict) -> list[tuple[str, dict]]:
+    return [
+        (node_id, node)
+        for node_id, node in workflow.items()
+        if isinstance(node, dict) and node.get("class_type") == "LoadImage"
+    ]
 
 
-def _select_edit_load_image_node(workflow: dict) -> dict:
+def _select_edit_load_image_node(workflow: dict) -> tuple[str, dict]:
     load_nodes = _collect_load_image_nodes(workflow)
     if len(load_nodes) == 1:
         return load_nodes[0]
     raise ValueError(f"Edit workflow requires exactly one LoadImage node, found {len(load_nodes)}.")
 
 
-def _select_multi_view_load_image_node(workflow: dict) -> dict:
+def _select_multi_view_load_image_node(workflow: dict) -> tuple[str, dict]:
     load_nodes = _collect_load_image_nodes(workflow)
-    titled_nodes = [node for node in load_nodes if (node.get("title") or "") == "Load Character Image"]
+    titled_nodes = [
+        (node_id, node)
+        for node_id, node in load_nodes
+        if ((node.get("_meta") or {}).get("title") or "") == "Load Character Image"
+    ]
 
     if len(titled_nodes) == 1:
         return titled_nodes[0]
@@ -120,14 +196,15 @@ def _select_multi_view_load_image_node(workflow: dict) -> dict:
 
 
 def _set_load_image_value(node: dict, image_value: str) -> None:
-    widgets = node.get("widgets_values")
-    if not isinstance(widgets, list) or not widgets:
-        raise ValueError("Selected LoadImage node does not expose widgets_values[0].")
-    widgets[0] = image_value
+    inputs = node.get("inputs")
+    if not isinstance(inputs, dict) or "image" not in inputs:
+        raise ValueError("Selected LoadImage node does not expose inputs.image.")
+    inputs["image"] = image_value
 
 
 def _build_base_payload(enhanced_prompt: str) -> dict:
     workflow = _load_workflow_template(BASE_TEMPLATE_PATH)
+    workflow = _require_api_prompt_template(workflow, BASE_TEMPLATE_PATH.name)
     workflow = _replace_placeholders(workflow, {"___USER_PROMPT___": enhanced_prompt})
     workflow = _randomize_seeds(workflow)
     return {
@@ -138,8 +215,9 @@ def _build_base_payload(enhanced_prompt: str) -> dict:
 
 def _build_edit_payload(base_image: str, custom_prompt: str) -> dict:
     workflow = _load_workflow_template(EDIT_TEMPLATE_PATH)
+    workflow = _require_api_prompt_template(workflow, EDIT_TEMPLATE_PATH.name)
     workflow = _replace_placeholders(workflow, {"___CUSTOM_PROMPT___": custom_prompt})
-    load_node = _select_edit_load_image_node(workflow)
+    _, load_node = _select_edit_load_image_node(workflow)
     _set_load_image_value(load_node, base_image)
     workflow = _randomize_seeds(workflow)
     return {
@@ -150,7 +228,8 @@ def _build_edit_payload(base_image: str, custom_prompt: str) -> dict:
 
 def _build_multi_view_payload(target_image: str) -> dict:
     workflow = _load_workflow_template(MULTI_VIEW_TEMPLATE_PATH)
-    load_node = _select_multi_view_load_image_node(workflow)
+    workflow = _require_api_prompt_template(workflow, MULTI_VIEW_TEMPLATE_PATH.name)
+    _, load_node = _select_multi_view_load_image_node(workflow)
     _set_load_image_value(load_node, target_image)
     workflow = _randomize_seeds(workflow)
     return {
@@ -198,20 +277,25 @@ No conversational text and no quotes.
     try:
         comfyui_payload = _build_base_payload(enhanced_prompt)
     except Exception as exc:
-        logger.error(f"Failed to load base ComfyUI template: {exc}")
+        error_message = f"베이스 생성용 ComfyUI 템플릿 로드에 실패했습니다. ({exc})"
+        logger.error(error_message)
         return {
             "base_ring_image_url": "",
             "synthesized_prompt": enhanced_prompt,
-            "status_message": "베이스 생성 템플릿 로드에 실패했습니다.",
+            "generation_result": "system_error",
+            "status_message": error_message,
         }
 
-    result_urls = _sync_call_comfyui(comfyui_payload)
+    comfy_result = _sync_call_comfyui(comfyui_payload)
+    result_urls = comfy_result["image_urls"]
     final_url = result_urls[0] if result_urls else ""
+    error_message = comfy_result["error_message"]
 
     return {
         "base_ring_image_url": final_url,
         "synthesized_prompt": enhanced_prompt,
-        "status_message": "베이스 이미지 생성에 실패했습니다." if not final_url else "",
+        "generation_result": "system_error" if error_message else "success",
+        "status_message": error_message if error_message else "",
     }
 
 
@@ -225,29 +309,36 @@ def edit_image(state: AgentState) -> dict:
     logger.info(f"Applying customization to image: {base_image}...")
 
     if not base_image:
+        error_message = "커스텀 편집에 사용할 입력 이미지가 없습니다."
         return {
             "edited_ring_image_url": "",
             "synthesized_prompt": custom_prompt,
-            "status_message": "커스텀 편집에 사용할 입력 이미지가 없습니다.",
+            "generation_result": "system_error",
+            "status_message": error_message,
         }
 
     try:
         comfyui_payload = _build_edit_payload(base_image, custom_prompt)
     except Exception as exc:
-        logger.error(f"Failed to build edit ComfyUI payload: {exc}")
+        error_message = f"커스텀 편집용 ComfyUI payload 구성에 실패했습니다. ({exc})"
+        logger.error(error_message)
         return {
             "edited_ring_image_url": "",
             "synthesized_prompt": custom_prompt,
-            "status_message": f"커스텀 편집용 LoadImage 주입에 실패했습니다. ({exc})",
+            "generation_result": "system_error",
+            "status_message": error_message,
         }
 
-    result_urls = _sync_call_comfyui(comfyui_payload)
+    comfy_result = _sync_call_comfyui(comfyui_payload)
+    result_urls = comfy_result["image_urls"]
     final_url = result_urls[0] if result_urls else ""
+    error_message = comfy_result["error_message"]
 
     return {
         "edited_ring_image_url": final_url,
         "synthesized_prompt": custom_prompt,
-        "status_message": "커스텀 이미지 생성에 실패했습니다." if not final_url else "",
+        "generation_result": "system_error" if error_message else "success",
+        "status_message": error_message if error_message else "",
     }
 
 
@@ -260,23 +351,30 @@ def generate_multi_view(state: AgentState) -> dict:
     logger.info(f"Extracting multi-views and applying Birefnet rembg. Target: {target_image}")
 
     if not target_image:
+        error_message = "다각도 생성에 사용할 입력 이미지가 없습니다."
         return {
             "current_image_urls": [],
-            "status_message": "다각도 생성에 사용할 입력 이미지가 없습니다.",
+            "generation_result": "system_error",
+            "status_message": error_message,
         }
 
     try:
         comfyui_payload = _build_multi_view_payload(target_image)
     except Exception as exc:
-        logger.error(f"Failed to build multi-view ComfyUI payload: {exc}")
+        error_message = f"다각도용 ComfyUI payload 구성에 실패했습니다. ({exc})"
+        logger.error(error_message)
         return {
             "current_image_urls": [],
-            "status_message": f"다각도용 LoadImage 주입에 실패했습니다. ({exc})",
+            "generation_result": "system_error",
+            "status_message": error_message,
         }
 
-    result_urls = _sync_call_comfyui(comfyui_payload)
+    comfy_result = _sync_call_comfyui(comfyui_payload)
+    result_urls = comfy_result["image_urls"]
+    error_message = comfy_result["error_message"]
 
     return {
         "current_image_urls": result_urls,
-        "status_message": "다각도 이미지 생성에 실패했습니다." if not result_urls else "",
+        "generation_result": "system_error" if error_message else "success",
+        "status_message": error_message if error_message else "",
     }

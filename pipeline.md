@@ -1,59 +1,73 @@
-# Ring Customization Pipeline Architecture
+# Ring Pipeline Architecture
 
-이 문서는 현재 저장소의 반지 커스텀 파이프라인을 기준으로 LangGraph 오케스트레이션과 ComfyUI 연동 방식을 설명합니다.
+반지 커스텀 파이프라인의 실제 실행 흐름을 정리한 문서입니다. 현재 구현은 `gemma4:26b` + LangGraph + ComfyUI 조합을 기준으로 동작합니다.
 
-## 시나리오별 주 흐름
-### 1. 텍스트 온리
+## Canonical Scenarios
+
+### 1. `text`
 - `router -> rag -> generate_base_image -> validate_base_image`
-- `validate_base_image` 는 사용자 요청 반영 여부와 보색/고대비 배경 적합성을 함께 검수
 - 검수 성공 시 `wait_for_user_approval`
-- `accept_base` 이면 `generate_multi_view -> validate_rembg -> end`
-- `request_customization` 이면 `edit_image -> validate_edited_image -> wait_for_edit_approval`
-- 2차 휴게소에서 `accept_base` 이면 `generate_multi_view -> validate_rembg -> end`
+- `accept_base` 선택 시 `generate_multi_view -> validate_rembg -> end`
+- `request_customization` 선택 시 `edit_image -> validate_edited_image -> wait_for_edit_approval`
+- 2차 휴게소에서 `accept_base` 면 `generate_multi_view`
 - 2차 휴게소에서 `request_customization` 이면 다시 `edit_image`
 
-### 2. 이미지 기반 커스텀
+### 2. `image_and_text`
 - `router -> validate_input_image -> edit_image -> validate_edited_image`
 - 검수 성공 시 `wait_for_edit_approval`
-- `accept_base` 이면 `generate_multi_view -> validate_rembg -> end`
-- `request_customization` 이면 다시 `edit_image`
+- `accept_base` 선택 시 `generate_multi_view -> validate_rembg -> end`
+- `request_customization` 선택 시 다시 `edit_image`
 
-### 3. 다각도 즉시 추출
+### 3. `image_only`
 - `router -> validate_input_image -> generate_multi_view -> validate_rembg -> end`
-- 기본적으로 휴게소 없음
-- 다만 `validate_input_image` 가 `배경 대비 문제` 로 실패하면 내부 보정용으로 `edit_image -> validate_edited_image -> generate_multi_view` 를 타고, 이 경로에서도 사용자 interrupt 는 만들지 않습니다.
-- `validate_input_image` 가 이미지 다운로드 실패나 Vision 검수 오류 같은 `시스템 오류` 로 실패하면 내부 보정을 시도하지 않고 즉시 실패 처리합니다.
+- 기본적으로 interrupt 없음
+- 입력 이미지 가드레일이 `repair_required` 이면 내부적으로만 `edit_image -> validate_edited_image -> generate_multi_view`
+- 이 내부 보정은 사용자 휴게소를 만들지 않음
 
-## 내부 가드레일
-- 시나리오 1의 `validate_base_image` 와 시나리오 2/3의 `validate_input_image` 는 같은 보색/고대비 배경 원칙을 공유합니다.
-- `validate_input_image` 는 시나리오 2/3 에서만 동작합니다.
-- `validate_input_image` 의 결과는 `pass`, `repair_required`, `system_error` 세 가지 의미로 해석합니다.
-- 시나리오 2 에서는 보정 edit 가 발생해도 최종적으로 `wait_for_edit_approval` 로 갑니다.
-- 시나리오 3 에서는 보정 edit 가 발생해도 곧바로 `generate_multi_view` 로 복귀합니다.
+## Guardrail Semantics
 
-## 요청/응답 계약
-- 입력 타입은 외부에서 `text`, `image`, `modification`, `image_only`, `image_and_text` 를 허용합니다.
-- 내부 canonical 값은 `text`, `image_only`, `image_and_text` 입니다.
-- `action=start` 는 `prompt` 또는 `image_url` 중 하나 이상이 필요합니다.
-- `action=request_customization` 는 비어 있지 않은 `customization_prompt` 가 필요합니다.
-- 휴게소 상태는 `waiting_for_user`, `waiting_for_user_edit` 두 종류입니다.
-- 버튼 의미는 고정입니다.
-  - `합격 -> accept_base`
-  - `각인 수정/재수정 -> request_customization`
+`validate_input_image` 는 아래 3가지 결과만 반환합니다.
 
-## ComfyUI 연동 원칙
-- JSON 파일은 ComfyUI 에서 export 한 artifact 로 취급합니다.
-- 런타임은 workflow JSON 을 읽은 뒤 메모리상 객체만 수정합니다.
-- prompt 는 기존 텍스트 치환 방식으로 주입합니다.
-- 이미지 입력은 `LoadImage.widgets_values[0]` 를 런타임에서 교체합니다.
-- edit workflow 는 `LoadImage` 노드가 정확히 1개여야 합니다.
-- multi-view workflow 는 title 이 `Load Character Image` 인 `LoadImage` 노드를 우선 사용하고, 없으면 `LoadImage` 가 1개일 때만 사용합니다.
-- 후보가 여러 개인데 고를 수 없으면 명시적으로 실패합니다.
+- `pass`: 원래 시나리오대로 진행
+- `repair_required`: 배경 대비가 부족해서 내부 보정 필요
+- `system_error`: 다운로드 실패, Vision LLM 오류 등 시스템 문제로 즉시 실패
 
-## 검수 정책
-- 기본 정책은 fail-closed 입니다.
-- 배경 검수는 반지 재질과 배경색의 분리 가능성을 직접 확인합니다. 흰 반지 on 흰 배경 같은 케이스는 명시적으로 실패 처리합니다.
-- 입력 이미지 가드레일에서 시스템 오류가 발생하면 내부 보정 경로로 넘기지 않고 즉시 실패 처리합니다. 개발 중에만 `ALLOW_VALIDATION_BYPASS=true` 로 우회할 수 있습니다.
-- 이미지 다운로드 실패, Vision LLM 오류, 빈 multi-view 결과는 기본적으로 실패 처리합니다.
-- `.env` 에서 `ALLOW_VALIDATION_BYPASS=true` 를 줄 때만 Vision 검수 오류를 개발용으로 우회합니다.
-- 최종 성공 응답은 `is_valid=True` 이고 결과 이미지가 1장 이상일 때만 반환합니다.
+즉 내부 `edit_image` 보정은 `배경 대비 불량` 일 때만 발생합니다. 시스템 오류를 배경 수정처럼 처리하지 않습니다.
+
+## Request Contract
+
+외부 입력으로는 `text`, `image`, `modification`, `image_only`, `image_and_text` 를 모두 받습니다. 내부 canonical 값은 `text`, `image_only`, `image_and_text` 입니다.
+
+정규화 규칙은 payload shape 우선입니다.
+
+- `image_url` 없음 + `prompt` 있음: `text`
+- `image_url` 있음 + `prompt` 없음: `image_only`
+- `image_url` 있음 + `prompt` 있음: `image_and_text`
+
+추가 제약은 다음과 같습니다.
+
+- `action="start"` 는 `prompt` 나 `image_url` 중 하나가 반드시 있어야 함
+- `action="request_customization"` 는 `customization_prompt` 가 반드시 있어야 함
+
+## ComfyUI Integration
+
+저장소의 ComfyUI JSON 파일은 `repo에서 직접 수정하는 대상` 이 아니라 `실행용 템플릿` 입니다. 현재 구현은 ComfyUI API format JSON 을 읽은 뒤, 메모리상에서만 필요한 값을 주입해 `/prompt` 로 전송합니다.
+
+- base template: `image_z_image_turbo (2).json` 우선 사용, 없으면 `image_z_image_turbo.json` fallback
+- edit template: `image_qwen_image_edit_2509.json`
+- multi-view template: `templates-1_click_multiple_character_angles-v1.0 (3).json`
+
+런타임 주입 규칙:
+
+- 텍스트 placeholder 는 문자열 치환으로 주입
+- 입력 이미지는 `LoadImage.inputs.image` 를 교체
+- edit workflow 는 `LoadImage` 가 정확히 1개여야 함
+- multi-view workflow 는 `_meta.title == "Load Character Image"` 인 `LoadImage` 를 우선 사용
+- 후보가 애매하면 조용히 진행하지 않고 즉시 실패
+
+## Failure Policy
+
+- ComfyUI `/prompt` 또는 `/history` 오류는 `generation_result=system_error` 로 즉시 실패
+- Vision 검수 오류도 기본은 실패
+- `ALLOW_VALIDATION_BYPASS=true` 일 때만 개발용 우회 허용
+- 최종 성공은 `is_valid=True` 이고 결과 이미지가 1장 이상 있을 때만 인정

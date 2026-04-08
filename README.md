@@ -18,6 +18,7 @@ LangGraph 기반으로 반지 시안 생성, 커스텀 편집, 다각도 추출,
 
 `validate_input_image` 같은 배경/누끼 가드레일은 시나리오 2/3 진입 전에만 동작하는 내부 보정 단계입니다. 여기서 내부 보정은 배경 대비 문제가 명확할 때만 수행하고, 이미지 다운로드 실패나 Vision LLM 오류 같은 시스템 오류는 보정으로 위장하지 않고 즉시 실패 처리합니다. 특히 `image_only` 에서 내부 보정용 `edit_image` 를 타더라도 사용자 휴게소를 추가하지 않습니다.
 시나리오 1의 `validate_base_image` 도 이제 반지 요청 반영 여부뿐 아니라, 배경이 반지 재질과 충분히 보색/고대비인지 함께 검수합니다.
+ComfyUI 호출 자체가 실패하면 Vision 검수로 넘어가 재시도하지 않고, 해당 HTTP/실행 오류 메시지를 그대로 최종 실패 메시지로 반환합니다.
 
 ## 설치
 ```bash
@@ -43,11 +44,11 @@ ALLOW_VALIDATION_BYPASS=false
 - 실제 백엔드 연동 테스트를 하려면 `test_run.py` 를 쓰지 말고, 앱 서버나 별도 호출 코드에서 `process_generation_request()` 를 사용하거나 `test_run.py` 의 해당 줄을 비활성화해야 합니다.
 
 ## ComfyUI JSON 취급 원칙
-- `image_z_image_turbo.json`
+- `image_z_image_turbo (2).json`
 - `image_qwen_image_edit_2509.json`
 - `templates-1_click_multiple_character_angles-v1.0 (3).json`
 
-이 파일들은 ComfyUI 에서 export 한 workflow snapshot 으로 취급합니다. 저장소에서는 JSON 자체를 수정하지 않고, Python 런타임이 파일을 읽은 뒤 메모리상에서 prompt 값과 `LoadImage.widgets_values[0]` 만 동적으로 주입해서 ComfyUI 로 전송합니다.
+이 파일들은 ComfyUI API format JSON 으로 취급합니다. 저장소에서는 JSON 자체를 수정하지 않고, Python 런타임이 파일을 읽은 뒤 메모리상에서 prompt 값과 `LoadImage.inputs.image` 만 동적으로 주입해서 ComfyUI 로 전송합니다.
 
 ## 실행 준비
 1. Ollama 에 `gemma4:26b` 를 준비합니다.

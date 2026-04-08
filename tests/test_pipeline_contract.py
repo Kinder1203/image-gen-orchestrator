@@ -17,23 +17,33 @@ HAS_DB_DEPS = all(
 
 
 class ExportedTemplateContractTests(unittest.TestCase):
+    def test_base_template_is_api_prompt_format(self):
+        template = json.loads(Path("image_z_image_turbo (2).json").read_text(encoding="utf-8"))
+
+        self.assertTrue(template)
+        self.assertTrue(all("class_type" in node and "inputs" in node for node in template.values()))
+        self.assertIn("___USER_PROMPT___", json.dumps(template, ensure_ascii=False))
+
     def test_edit_template_keeps_exported_load_image_shape(self):
         template = json.loads(Path("image_qwen_image_edit_2509.json").read_text(encoding="utf-8"))
-        load_nodes = [node for node in template["nodes"] if node.get("type") == "LoadImage"]
+        load_nodes = [node for node in template.values() if node.get("class_type") == "LoadImage"]
 
         self.assertEqual(len(load_nodes), 1)
-        self.assertNotEqual(load_nodes[0].get("widgets_values", [None])[0], "___BASE_IMAGE___")
+        self.assertIn("image", load_nodes[0]["inputs"])
+        self.assertNotEqual(load_nodes[0]["inputs"]["image"], "___BASE_IMAGE___")
+        self.assertIn("___CUSTOM_PROMPT___", json.dumps(template, ensure_ascii=False))
 
     def test_multi_view_template_keeps_exported_load_image_shape(self):
         template = json.loads(
             Path("templates-1_click_multiple_character_angles-v1.0 (3).json").read_text(encoding="utf-8")
         )
-        load_nodes = [node for node in template["nodes"] if node.get("type") == "LoadImage"]
-        titled_nodes = [node for node in load_nodes if (node.get("title") or "") == "Load Character Image"]
+        load_nodes = [node for node in template.values() if node.get("class_type") == "LoadImage"]
+        titled_nodes = [node for node in load_nodes if ((node.get("_meta") or {}).get("title") or "") == "Load Character Image"]
 
         self.assertGreaterEqual(len(load_nodes), 1)
         self.assertEqual(len(titled_nodes), 1)
-        self.assertNotEqual(titled_nodes[0].get("widgets_values", [None])[0], "___TARGET_IMAGE___")
+        self.assertIn("image", titled_nodes[0]["inputs"])
+        self.assertNotEqual(titled_nodes[0]["inputs"]["image"], "___TARGET_IMAGE___")
 
 
 @unittest.skipUnless(HAS_PYDANTIC, "pydantic is required for schema tests")
@@ -102,6 +112,22 @@ class FakeGraph:
 
 @unittest.skipUnless(HAS_RUNTIME_DEPS, "runtime dependencies are required for pipeline tests")
 class PipelineRuntimeTests(unittest.TestCase):
+    def test_generation_system_error_stops_without_retry(self):
+        agent = importlib.import_module("src.llm_pipeline.agent")
+
+        self.assertEqual(
+            agent.check_base_validation({"generation_result": "system_error", "retry_count": 0, "is_valid": False}),
+            "end",
+        )
+        self.assertEqual(
+            agent.check_edit_validation({"generation_result": "system_error", "retry_count": 0, "is_valid": False}),
+            "end",
+        )
+        self.assertEqual(
+            agent.check_rembg_validation({"generation_result": "system_error", "retry_count": 0, "is_valid": False}),
+            "end",
+        )
+
     def test_input_image_guardrail_routes_system_error_to_end(self):
         agent = importlib.import_module("src.llm_pipeline.agent")
 
@@ -177,6 +203,47 @@ class PipelineRuntimeTests(unittest.TestCase):
 
         self.assertEqual(repaired["guardrail_result"], "repair_required")
         self.assertIn("solid pitch black", repaired["customization_prompt"])
+
+    def test_validate_base_image_preserves_generation_system_error_message(self):
+        validator = importlib.import_module("src.llm_pipeline.nodes.validator")
+
+        result = validator.validate_base_image(
+            {
+                "base_ring_image_url": "",
+                "generation_result": "system_error",
+                "status_message": "ComfyUI request failed with HTTP 500: missing model",
+                "retry_count": 0,
+            }
+        )
+
+        self.assertFalse(result["is_valid"])
+        self.assertEqual(result["generation_result"], "system_error")
+        self.assertEqual(result["status_message"], "ComfyUI request failed with HTTP 500: missing model")
+
+    def test_validator_resolves_plain_comfy_filename_to_input_view_url(self):
+        validator = importlib.import_module("src.llm_pipeline.nodes.validator")
+
+        seen = {}
+
+        class FakeResponse:
+            content = b"fake-image"
+
+            def raise_for_status(self):
+                return None
+
+        original_get = validator.requests.get
+
+        try:
+            def fake_get(url, timeout=10):
+                seen["url"] = url
+                return FakeResponse()
+
+            validator.requests.get = fake_get
+            validator._encode_image_from_url("sample_input.png")
+        finally:
+            validator.requests.get = original_get
+
+        self.assertIn("/view?filename=sample_input.png&type=input", seen["url"])
 
     def test_multi_view_only_edit_success_skips_second_wait(self):
         agent = importlib.import_module("src.llm_pipeline.agent")

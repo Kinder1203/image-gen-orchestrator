@@ -1,16 +1,17 @@
 # Nodes Module
 
-`nodes/` 는 반지 커스텀 파이프라인의 실제 비즈니스 로직 레이어입니다.
+`nodes/` 는 파이프라인의 실제 실행 단계를 담당합니다.
 
-## 노드 목록
-- `router.py`: 요청 형태를 보고 흐름 분기
-- `rag.py`: 반지 도메인 Vector RAG
-- `synthesizer.py`: exported ComfyUI JSON 을 읽어 런타임에서 prompt/image 를 주입하고 호출
-- `validator.py`: `gemma4` 기반 Vision 검수와 입력 이미지 가드레일, 보색 배경 검수
+## Files
 
-## 현재 설계 원칙
-- 노드끼리 직접 호출하지 않고 `agent.py` 의 LangGraph 가 흐름을 제어합니다.
-- 시나리오 3의 내부 가드레일 보정은 사용자 휴게소를 만들지 않습니다.
-- JSON workflow 파일은 repo 에서 수정하지 않고 메모리상에서만 `LoadImage.widgets_values[0]` 를 교체합니다.
-- 시나리오 1 생성 검수와 시나리오 2/3 입력 검수는 같은 배경 대비 원칙을 공유합니다.
-- 입력 이미지 가드레일은 `배경 보정 필요` 와 `검수 시스템 오류` 를 구분하고, 시스템 오류는 보정 edit 로 우회하지 않습니다.
+- `router.py`: 입력 형태를 보고 시나리오를 결정
+- `rag.py`: 반지 규칙용 Vector RAG 조회
+- `synthesizer.py`: ComfyUI API format JSON 에 prompt / image 값을 주입하고 생성 실행
+- `validator.py`: Vision 검수와 입력 이미지 가드레일 수행
+
+## Current Contract
+
+- 시나리오 3의 내부 보정 edit 는 성공해도 `wait_for_edit_approval` 로 가지 않고 바로 `generate_multi_view` 로 복귀합니다.
+- `validate_input_image` 는 `pass`, `repair_required`, `system_error` 를 명확히 구분합니다.
+- JSON 파일은 repo에서 직접 수정하지 않고, 런타임에서만 `LoadImage.inputs.image` 를 교체합니다.
+- ComfyUI 생성 시스템 오류는 Vision 검수로 넘기지 않고 즉시 실패 처리합니다.

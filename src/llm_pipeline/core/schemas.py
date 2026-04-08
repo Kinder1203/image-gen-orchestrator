@@ -82,6 +82,7 @@ class AgentState(TypedDict):
 
     validation_reason: str
     guardrail_result: str
+    generation_result: str
     retry_count: int
 
     current_image_urls: List[str]
