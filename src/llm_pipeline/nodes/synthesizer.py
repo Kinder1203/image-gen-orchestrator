@@ -30,7 +30,7 @@ def _resolve_template_path(*candidates: str) -> Path:
 
 BASE_TEMPLATE_PATH = _resolve_template_path("image_z_image_turbo (2).json", "image_z_image_turbo.json")
 EDIT_TEMPLATE_PATH = _resolve_template_path("image_qwen_image_edit_2509.json")
-MULTI_VIEW_TEMPLATE_PATH = _resolve_template_path("templates-1_click_multiple_character_angles-v1.0 (3).json")
+MULTI_VIEW_TEMPLATE_PATH = _resolve_template_path("templates-1_click_multiple_character_angles-v1.0 (3) (1).json")
 
 
 def _truncate_text(text: str, max_len: int = 400) -> str:
