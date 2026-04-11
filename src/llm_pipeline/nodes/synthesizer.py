@@ -27,7 +27,18 @@ def _resolve_template_path(*candidates: str) -> Path:
 
     for candidate in candidates:
         candidate_path = Path(candidate)
-        paths_to_check = [candidate_path] if candidate_path.is_absolute() else [root / candidate_path for root in search_roots]
+        if candidate_path.is_absolute():
+            paths_to_check = [candidate_path]
+        else:
+            relative_candidates = (
+                candidate_path,
+                Path("comfyui_workflow") / candidate_path,
+            )
+            paths_to_check = [
+                root / relative_candidate
+                for root in search_roots
+                for relative_candidate in relative_candidates
+            ]
 
         for path in paths_to_check:
             if path.exists():

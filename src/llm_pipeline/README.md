@@ -148,9 +148,9 @@ UI나 데모에서는 사람 친화적인 표현을 써도 되지만, 실제 계
 ## ComfyUI 템플릿 정책
 현재 저장소에서 사용하는 ComfyUI 템플릿 파일은 아래 세 개입니다.
 
-- `image_z_image_turbo (2).json`
-- `image_qwen_image_edit_2509.json`
-- `templates-1_click_multiple_character_angles-v1.0 (3) (1).json`
+- `comfyui_workflow/image_z_image_turbo (2).json`
+- `comfyui_workflow/image_qwen_image_edit_2509.json`
+- `comfyui_workflow/templates-1_click_multiple_character_angles-v1.0 (3) (1).json`
 
 운영 원칙:
 - 저장소의 JSON 파일은 직접 수정 대상이 아니라 실행용 템플릿입니다.

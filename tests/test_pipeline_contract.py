@@ -19,6 +19,17 @@ HAS_DB_DEPS = all(
 )
 
 
+def _template_path(filename: str) -> Path:
+    candidates = (
+        Path(filename),
+        Path("comfyui_workflow") / filename,
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(f"Template file was not found: {filename}")
+
+
 class ExportedTemplateContractTests(unittest.TestCase):
     def test_synthesizer_resolves_templates_from_non_root_cwd(self):
         project_root = Path.cwd().resolve()
@@ -43,14 +54,14 @@ class ExportedTemplateContractTests(unittest.TestCase):
         self.assertTrue(synthesizer.MULTI_VIEW_TEMPLATE_PATH.exists())
 
     def test_base_template_is_api_prompt_format(self):
-        template = json.loads(Path("image_z_image_turbo (2).json").read_text(encoding="utf-8"))
+        template = json.loads(_template_path("image_z_image_turbo (2).json").read_text(encoding="utf-8"))
 
         self.assertTrue(template)
         self.assertTrue(all("class_type" in node and "inputs" in node for node in template.values()))
         self.assertIn("___USER_PROMPT___", json.dumps(template, ensure_ascii=False))
 
     def test_edit_template_keeps_exported_load_image_shape(self):
-        template = json.loads(Path("image_qwen_image_edit_2509.json").read_text(encoding="utf-8"))
+        template = json.loads(_template_path("image_qwen_image_edit_2509.json").read_text(encoding="utf-8"))
         load_nodes = [node for node in template.values() if node.get("class_type") == "LoadImage"]
 
         self.assertEqual(len(load_nodes), 1)
@@ -60,7 +71,9 @@ class ExportedTemplateContractTests(unittest.TestCase):
 
     def test_multi_view_template_keeps_exported_load_image_shape(self):
         template = json.loads(
-            Path("templates-1_click_multiple_character_angles-v1.0 (3) (1).json").read_text(encoding="utf-8")
+            _template_path("templates-1_click_multiple_character_angles-v1.0 (3) (1).json").read_text(
+                encoding="utf-8"
+            )
         )
         load_nodes = [node for node in template.values() if node.get("class_type") == "LoadImage"]
         titled_nodes = [node for node in load_nodes if ((node.get("_meta") or {}).get("title") or "") == "Load Character Image"]

@@ -107,6 +107,7 @@ python -m unittest tests.test_pipeline_contract
 |-- AGENTS.md
 |-- requirements.txt
 |-- test_run.py
+|-- comfyui_workflow/
 |-- tests/
 |-- input_images/
 |-- output_images/

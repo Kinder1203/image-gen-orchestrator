@@ -3,15 +3,13 @@ pydantic>=2.4.0
 pydantic-settings>=2.0.0
 loguru>=0.7.0
 
-# Langchain & LangGraph Orchestration
-langchain-core>=0.1.0
+# LangGraph orchestration and vLLM client
 langgraph>=1.1.6,<2.0.0
 langgraph-checkpoint-sqlite>=3.0.3,<4.0.0
 openai>=1.30.0
 
 # 3D Pipeline Vector RAG (Lightweight search)
 langchain-chroma>=0.1.0
-chromadb>=0.4.0
 
 # HTTP and Image Processing Tools
 requests>=2.31.0

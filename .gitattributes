@@ -1,0 +1,9 @@
+# Normalize tracked text files to LF across Windows/Linux environments.
+* text=auto
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.txt text eol=lf
+*.gitignore text eol=lf
+*.gitattributes text eol=lf
+*.gitkeep text eol=lf
