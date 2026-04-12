@@ -1,4 +1,4 @@
-# API Spec
+# Server README
 
 이 문서는 백엔드가 호출할 HTTP 레이어만 설명합니다.  
 파이프라인 흐름, 액션 의미, 상태 전이 세부 규칙은 [src/llm_pipeline/README.md](</c:/Users/user/Desktop/project/src/llm_pipeline/README.md:1>)를 기준으로 봅니다.
@@ -43,6 +43,9 @@
   "checkpoint_path": "./data/langgraph_checkpoints.sqlite"
 }
 ```
+
+`chat_model`과 `embed_model`은 서버가 현재 설정에서 읽은 raw 문자열을 그대로 반환합니다.  
+따라서 환경에 따라 `BAAI/bge-m3` 같은 전체 모델 ID가 보일 수도 있고, `bge-m3` 같은 배포 alias가 보일 수도 있습니다.
 
 ### `POST /pipeline`
 
