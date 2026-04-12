@@ -24,6 +24,12 @@ _BACKGROUND_CONTRAST_POLICY = (
     "metals."
 )
 
+_BASE_SURFACE_REJECTION_POLICY = (
+    "Reject the image if there is any visible ground plane, support surface, tabletop, pedestal, "
+    "studio sweep curve, textured floor, gradient backdrop, floor reflection, cast shadow, "
+    "contact shadow, drop shadow, or ambient shadow directly beneath the ring."
+)
+
 
 def _select_validation_urls(urls: list[str], limit: int) -> list[str]:
     if limit <= 0 or len(urls) <= limit:
@@ -180,8 +186,10 @@ def validate_base_image(state: AgentState) -> dict:
         f"'{user_prompt}'? "
         f"Generated prompt hint: '{synthesized_prompt}'. "
         f"{_BACKGROUND_CONTRAST_POLICY} "
+        f"{_BASE_SURFACE_REJECTION_POLICY} "
         "Confirm the ring silhouette and inner hole are clearly separated from the background, "
-        "and the ring itself is high quality. "
+        "the requested ring count and user-specified details are preserved, and the ring itself is high quality. "
+        "If the image is invalid, explain the dominant corrective changes succinctly so the next retry can fix them. "
         "Return JSON {'is_valid': true/false, 'reason': '...'}."
     )
 

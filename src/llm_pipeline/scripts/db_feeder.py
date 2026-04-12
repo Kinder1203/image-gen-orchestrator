@@ -100,12 +100,35 @@ CURATED_RULES = [
     {
         "id": "background_subject_isolation_absolute",
         "category": "Validation_and_Rembg",
-        "title": "Ring Must Be the Only Subject",
+        "title": "Ring Must Be the Only Requested Subject Set",
         "tags": ["background", "subject-isolation", "prompt"],
         "content": (
-            "Source renders should contain exactly one centered ring as the only subject. Avoid extra "
-            "jewelry, decorative props, fingers, hands, shadows from other objects, and clutter that "
-            "can merge with the band silhouette or confuse downstream extraction."
+            "Source renders should contain only the requested ring subject set. Default to one centered ring, "
+            "but if the user explicitly asks for couple rings or a coordinated set, keep exactly that requested "
+            "pair or set and nothing else. Avoid extra jewelry, decorative props, fingers, hands, shadows from "
+            "other objects, and clutter that can merge with the band silhouette or confuse downstream extraction."
+        ),
+    },
+    {
+        "id": "requested_ring_count_pair_integrity",
+        "category": "Ring_Design",
+        "title": "Requested Pair or Set Must Stay Intact",
+        "tags": ["pair", "couple-ring", "ring-count"],
+        "content": (
+            "When the user asks for couple rings, matching bands, or a coordinated set, preserve that requested "
+            "ring count exactly. Show the rings side by side, fully visible, and equally prominent. Do not "
+            "collapse the request into a single hero ring and do not add unrelated extra jewelry."
+        ),
+    },
+    {
+        "id": "background_no_surface_contact_shadow",
+        "category": "Validation_and_Rembg",
+        "title": "No Ground Plane or Contact Shadow",
+        "tags": ["background", "shadow", "surface", "validation"],
+        "content": (
+            "Source renders for rembg should not rest on a visible tabletop, pedestal, sweep floor, or textured "
+            "surface. Reject or retry images with a visible ground plane, floor reflection, cast shadow, contact "
+            "shadow, or ambient shadow directly beneath the ring because those artifacts reduce clean alpha extraction."
         ),
     },
     {

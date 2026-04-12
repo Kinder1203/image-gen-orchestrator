@@ -1,7 +1,7 @@
 # Server README
 
 이 문서는 백엔드가 호출할 HTTP 레이어만 설명합니다.  
-파이프라인 흐름, 액션 의미, 상태 전이 세부 규칙은 [src/llm_pipeline/README.md](</c:/Users/user/Desktop/project/src/llm_pipeline/README.md:1>)를 기준으로 봅니다.
+파이프라인 흐름, 액션 의미, 상태 전이 세부 규칙은 [src/llm_pipeline/README.md](../src/llm_pipeline/README.md)를 기준으로 봅니다.
 
 ## 개요
 
@@ -39,7 +39,7 @@
   "status": "ok",
   "service": "ring-llm-pipeline",
   "chat_model": "gemma4-e4b",
-  "embed_model": "bge-m3",
+  "embed_model": "BAAI/bge-m3",
   "checkpoint_path": "./data/langgraph_checkpoints.sqlite"
 }
 ```
@@ -51,7 +51,7 @@
 
 파이프라인 시작과 HITL 재개를 모두 처리하는 단일 엔드포인트입니다.
 
-요청 바디는 [PipelineRequest](</c:/Users/user/Desktop/project/src/llm_pipeline/core/schemas.py:23>)와 같고, 응답 바디는 [PipelineResponse](</c:/Users/user/Desktop/project/src/llm_pipeline/core/schemas.py:63>)와 같습니다.
+요청 바디는 [PipelineRequest](../src/llm_pipeline/core/schemas.py)와 같고, 응답 바디는 [PipelineResponse](../src/llm_pipeline/core/schemas.py)와 같습니다.
 
 ## 요청 필드
 
@@ -88,7 +88,17 @@
 }
 ```
 
-### 3. 베이스 시안 승인
+### 3. 이미지로 바로 다각도 생성
+
+```json
+{
+  "thread_id": "2c1bfe4d-8b8b-4d50-8cd0-5f72a0f0d9d9",
+  "action": "start",
+  "image_url": "uploaded_ring.png"
+}
+```
+
+### 4. 베이스 시안 승인
 
 ```json
 {
@@ -97,7 +107,7 @@
 }
 ```
 
-### 4. 재수정 요청
+### 5. 재수정 요청
 
 ```json
 {

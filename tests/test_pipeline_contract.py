@@ -542,6 +542,8 @@ class PipelineRuntimeTests(unittest.TestCase):
         self.assertEqual(seen["image_url"], "base.png")
         self.assertIn("complementary or otherwise strongly contrasting", seen["prompt"])
         self.assertIn("white/platinum/silver", seen["prompt"])
+        self.assertIn("visible ground plane", seen["prompt"])
+        self.assertIn("contact shadow", seen["prompt"])
 
     def test_validate_input_image_distinguishes_system_error_from_repair(self):
         validator = importlib.import_module("src.llm_pipeline.nodes.validator")
@@ -593,7 +595,7 @@ class PipelineRuntimeTests(unittest.TestCase):
         self.assertIn("no watermark", prompt)
         self.assertIn("ring fully visible", prompt)
 
-    def test_synthesizer_normalizes_couple_ring_requests_to_one_representative_ring(self):
+    def test_synthesizer_preserves_couple_ring_requests_without_forcing_single_ring(self):
         synthesizer = importlib.import_module("src.llm_pipeline.nodes.synthesizer")
 
         prompt = synthesizer._enforce_background_contrast(
@@ -601,9 +603,11 @@ class PipelineRuntimeTests(unittest.TestCase):
             "18k 화이트골드 커플링, 심플한 제품 사진",
         )
 
-        self.assertIn("exactly one representative hero ring only", prompt)
-        self.assertIn("single ring only, not a pair or set", prompt)
-        self.assertIn("no second ring", prompt)
+        self.assertIn("preserve the requested pair or ring set exactly", prompt)
+        self.assertIn("exactly two distinct rings for a couple-ring request", prompt)
+        self.assertIn("both rings side by side with a small gap", prompt)
+        self.assertIn("all requested rings fully visible", prompt)
+        self.assertNotIn("exactly one representative hero ring only", prompt)
 
     def test_synthesizer_template_loader_returns_fresh_copy_even_when_cached(self):
         synthesizer = importlib.import_module("src.llm_pipeline.nodes.synthesizer")
@@ -707,6 +711,74 @@ class PipelineRuntimeTests(unittest.TestCase):
 
         self.assertIn("single flat pure icy white studio background", result["synthesized_prompt"])
         self.assertNotIn("single flat pure pitch-black studio background", result["synthesized_prompt"])
+
+    def test_extract_engraving_text_prefers_literal_token_before_korean_engraving_keyword(self):
+        synthesizer = importlib.import_module("src.llm_pipeline.nodes.synthesizer")
+
+        self.assertEqual(synthesizer._extract_engraving_text("안쪽에 forever 각인 추가"), "forever")
+        self.assertEqual(synthesizer._extract_engraving_text("반지 안쪽에 forever 각인 추가"), "forever")
+        self.assertEqual(synthesizer._extract_engraving_text("각인 문구는 forever"), "forever")
+
+    def test_reason_requests_surface_retry_detects_ground_plane_and_shadow_failures(self):
+        synthesizer = importlib.import_module("src.llm_pipeline.nodes.synthesizer")
+
+        self.assertTrue(
+            synthesizer._reason_requests_surface_retry(
+                "The rings are resting on a textured surface with a visible ground plane and contact shadow."
+            )
+        )
+        self.assertFalse(synthesizer._reason_requests_surface_retry("The female ring is missing its small diamond points."))
+
+    def test_build_base_retry_directive_strengthens_opposite_background_and_surface_constraints(self):
+        synthesizer = importlib.import_module("src.llm_pipeline.nodes.synthesizer")
+
+        directive = synthesizer._build_base_retry_directive(
+            "플래티넘 웨딩 커플링 한 쌍",
+            "The image has a visible ground plane, textured surface, and contact shadow beneath the rings.",
+            1,
+        )
+
+        self.assertIn("single flat pure pitch-black studio background", directive)
+        self.assertIn("background must be the direct opposite color family of the ring material", directive)
+        self.assertIn("no support surface anywhere in frame", directive)
+        self.assertIn("exactly two distinct rings for a couple-ring request", directive)
+
+    def test_build_edit_retry_directive_strengthens_inner_band_and_integration_constraints(self):
+        synthesizer = importlib.import_module("src.llm_pipeline.nodes.synthesizer")
+
+        directive = synthesizer._build_edit_retry_directive(
+            "반지 안쪽에 forever 각인 추가",
+            "engraving",
+            "forever",
+            "The engraving appears on the outer band and looks like a surface application instead of carved metal.",
+            1,
+        )
+
+        self.assertIn("engrave only the exact text 'forever' on the inner band", directive)
+        self.assertIn("no letters or markings on the visible outer surface", directive)
+        self.assertIn("engraving must be carved into the metal surface", directive)
+
+    def test_compose_edit_prompt_respects_inner_band_engraving_request(self):
+        synthesizer = importlib.import_module("src.llm_pipeline.nodes.synthesizer")
+
+        prompt = synthesizer._compose_edit_prompt(
+            {
+                "customization_prompt": "반지 안쪽에 forever 각인 추가",
+                "synthesized_prompt": "platinum ring, clean product photo",
+                "user_prompt": "반지 안쪽에 forever 각인 추가",
+                "validation_reason": "The engraving appears on the outer band and looks like a surface application.",
+                "retry_count": 1,
+            },
+            "Preserve engraving realism.",
+            "engraving",
+            "forever",
+        )
+
+        self.assertIn("Previous edit attempt failed", prompt)
+        self.assertIn("Engrave only the exact text 'forever' on the inner band.", prompt)
+        self.assertIn("Do not place any letters, symbols, or markings on the visible outer surface.", prompt)
+        self.assertIn("Retry-specific constraints:", prompt)
+        self.assertIn("no contact shadow", prompt)
 
     def test_customization_context_uses_configured_rag_top_k(self):
         synthesizer = importlib.import_module("src.llm_pipeline.nodes.synthesizer")
@@ -1181,6 +1253,8 @@ class DbFeederContractTests(unittest.TestCase):
         self.assertIn("Validation_and_Rembg", categories)
         self.assertIn("Ring_Material", categories)
         self.assertIn("background_subject_isolation_absolute", ids)
+        self.assertIn("requested_ring_count_pair_integrity", ids)
+        self.assertIn("background_no_surface_contact_shadow", ids)
         self.assertIn("edit_preserve_pose_crop_background", ids)
         self.assertIn("edit_removal_restore_surface", ids)
 

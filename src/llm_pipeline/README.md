@@ -7,6 +7,8 @@
 ## 계약 운영 방식
 - 이 문서는 파이프라인 의미 계약의 단일 기준 문서입니다. 액션 의미, 상태 전이, 검수 정책이 바뀌면 여기부터 수정합니다.
 - `tests.test_pipeline_contract`는 이 계약을 가볍게 회귀 확인하는 하네스입니다. 기본 목표는 실제 모델을 매번 끝까지 돌리는 것이 아니라, 스키마, 상태 흐름, 템플릿 shape, wrapper 경계가 문서와 어긋나지 않게 유지하는 것입니다.
+- 하네스는 대략 다섯 층을 나눠 봅니다. `ExportedTemplateContractTests`는 ComfyUI 템플릿 경로/shape를, `SchemaContractTests`는 요청·응답 정규화를, `ApiWrapperTests`는 HTTP wrapper를, `PipelineRuntimeTests`는 LangGraph 재개·웹훅·fallback 동작을, `DbFeederContractTests`는 RAG 적재 계약을 확인합니다.
+- 이 하네스는 실제 `vLLM`/ComfyUI 서버가 켜진 상태의 이미지 품질까지 대신 보장하지 않습니다. 그런 검증은 `python test_run.py`나 실환경 smoke run으로 별도 확인합니다.
 - 루트 `README.md`는 온보딩과 실행 방법만 요약하고, `server/README.md`는 HTTP transport 계약만 설명합니다. 세부 시나리오 의미를 다른 문서에 다시 길게 복제하지 않습니다.
 - `src/llm_pipeline/scripts/README.md`는 운영 스크립트 메모만 담당하며, 파이프라인 본문 계약은 이 문서를 기준으로 삼습니다.
 
@@ -17,7 +19,7 @@
 - `nodes/`: 라우팅, RAG, ComfyUI 생성, Vision 검수를 수행합니다.
 - `scripts/`: DB 적재 같은 보조 운영 스크립트를 둡니다.
 
-HTTP wrapper는 패키지 밖 [server/app.py](</c:/Users/user/Desktop/project/server/app.py:1>) / [server/api.py](</c:/Users/user/Desktop/project/server/api.py:1>)에서 관리합니다.
+HTTP wrapper는 패키지 밖 [server/app.py](../../server/app.py) / [server/api.py](../../server/api.py)에서 관리합니다.
 
 ## 추론 백엔드 전제
 - 채팅·비전 추론은 `VLLM_CHAT_*` 설정을 사용하는 `vLLM` 인스턴스 1개를 기준으로 합니다.
@@ -150,6 +152,7 @@ UI나 데모에서는 사람 친화적인 표현을 써도 되지만, 실제 계
 - `VLLM_EMBED_MODEL`
 - `VLLM_EMBED_API_KEY`
 
+`VLLM_CHAT_API_KEY`, `VLLM_EMBED_API_KEY`는 로컬 무인증 endpoint라면 `EMPTY` 예시를 쓸 수 있지만, 실제 배포에서 gateway나 reverse proxy가 앞단에 있으면 유효한 토큰이 필요할 수 있습니다.
 `VLLM_CHAT_MODEL`은 배포 환경에서 실제 서빙하는 Gemma 4 계열 모델 alias를 주입합니다. 양자화 여부나 `E4B`/다른 variant 선택은 코드가 아니라 배포 설정 책임입니다.
 `VLLM_EMBED_MODEL`도 같은 방식으로 raw 설정 문자열을 그대로 사용합니다. 코드 기본값은 `BAAI/bge-m3`지만, 실제 로컬/배포 환경에서는 `bge-m3` 같은 alias를 그대로 둘 수 있습니다.
 토큰 제한, 타임아웃, 재시도 상한, RAG 조회 개수, 기본 프롬프트 보강값은 환경 정보가 아니라 내부 튜닝값이므로 `src/llm_pipeline/core/config.py` 기본값으로 관리합니다.

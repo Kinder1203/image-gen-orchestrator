@@ -27,7 +27,7 @@ class EnvironmentSettings(BaseSettings):
 class InternalConfigDefaults:
     # Internal tuning defaults. These are maintained in code and are not part of
     # the primary environment contract.
-    VLLM_VALIDATOR_MAX_TOKENS = 120
+    VLLM_VALIDATOR_MAX_TOKENS = 400
     VLLM_PROMPT_MAX_TOKENS = 256
     VLLM_PROMPT_TEMPERATURE = 0.2
     WEBHOOK_TIMEOUT_SECONDS = 5
